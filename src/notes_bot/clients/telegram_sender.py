@@ -1,0 +1,27 @@
+"""Sends one message via the Bot API from a worker process — see
+queue/tasks.py's `smart_answer`. The worker has no Dispatcher/long-polling
+loop and doesn't need one just to call sendMessage; a Bot instance built
+for a single call is enough, closed right after.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from aiogram import Bot
+
+
+class Sender(Protocol):
+    async def send(self, chat_id: int, text: str) -> None: ...
+
+
+class TelegramSender:
+    def __init__(self, bot_token: str) -> None:
+        self._bot_token = bot_token
+
+    async def send(self, chat_id: int, text: str) -> None:
+        bot = Bot(token=self._bot_token)
+        try:
+            await bot.send_message(chat_id, text)
+        finally:
+            await bot.session.close()

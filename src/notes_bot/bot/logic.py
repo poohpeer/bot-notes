@@ -18,7 +18,7 @@ from notes_bot.db.repositories import ChatSettingsRepository, NoteRepository, Us
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.classify import classify_text_message
-from notes_bot.queue.queues import enqueue_process_note
+from notes_bot.queue.queues import enqueue_process_note, enqueue_smart_answer
 
 # instagram and voice go to `heavy` — see 03-ingest.md, "Шаг 2. Приём в
 # боте": "Выбрать очередь: instagram и voice → heavy, всё остальное → fast".
@@ -32,6 +32,7 @@ class Deps:
     search_cache: SearchSessionCache
     fast_queue: Queue
     heavy_queue: Queue
+    llm_queue: Queue
     settings: Settings
     # Needed to recognize "@botname" mentions in group messages — see
     # domain/group_capture.py. Resolved once via getMe at startup
@@ -196,6 +197,33 @@ async def run_search(
         has_more=len(hits) > page_size,
         session_id=session_id,
     )
+
+
+async def smart_search(
+    deps: Deps, *, user_id: int, chat_id: int, is_group_chat: bool, query_text: str
+) -> SearchPageResult:
+    """`/smart_search` — see 04-search.md: runs the exact same synchronous
+    search as `/search` (so it is never worse), then queues `smart_answer`
+    in `llm` for the synthesized, sourced answer that follows as a
+    separate message. No query rewriting (04-search.md explains why: it
+    would cost a second CLI-provider round trip for a saving that doesn't
+    pay for the extra latency).
+
+    Silently skips queuing when LLM_ENABLED=false — see
+    05-contracts.md/NullLLMClient: the smart answer just never arrives,
+    same as any other ai-proxy failure."""
+    page = await run_search(
+        deps, user_id=user_id, chat_id=chat_id, is_group_chat=is_group_chat, query_text=query_text
+    )
+    if deps.settings.llm_enabled:
+        enqueue_smart_answer(
+            deps.llm_queue,
+            user_id=user_id,
+            chat_id=chat_id,
+            is_group_chat=is_group_chat,
+            query_text=query_text,
+        )
+    return page
 
 
 @dataclass(frozen=True)

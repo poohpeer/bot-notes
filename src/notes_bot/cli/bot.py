@@ -71,6 +71,7 @@ async def main() -> None:
         search_cache=SearchSessionCache(async_redis.from_url(settings.redis_url)),
         fast_queue=Queue("fast", connection=rq_redis),
         heavy_queue=Queue("heavy", connection=rq_redis),
+        llm_queue=Queue("llm", connection=rq_redis),
         settings=settings,
         bot_username=me.username or "",
     )

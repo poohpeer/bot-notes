@@ -46,6 +46,7 @@ from notes_bot.bot.logic import (
     save_voice_note,
     set_group_capture_mode,
     show_more,
+    smart_search,
     toggle_privacy,
 )
 from notes_bot.bot.render import (
@@ -63,6 +64,7 @@ from notes_bot.bot.render import (
     render_privacy_toggle_confirmation,
     render_search_card,
     render_search_expired,
+    render_smart_answer_pending,
     render_trash_empty,
     render_voice_note_saved,
 )
@@ -78,8 +80,8 @@ _GROUP_TYPES = {"group", "supergroup"}
 async def on_start(message: Message) -> None:
     await message.answer(
         "Привет! Пришли мне текст — сохраню его как заметку с семантическим "
-        "поиском. Команды: /search <запрос>, /search_mine, /search_all, "
-        "/list, /trash."
+        "поиском. Команды: /search <запрос>, /smart_search <запрос>, "
+        "/search_mine, /search_all, /list, /trash."
     )
 
 
@@ -117,6 +119,29 @@ async def on_search(message: Message, deps: Deps) -> None:
         query_text=query_text,
     )
     await _send_page(message, page.hits, page.has_more, page.session_id)
+
+
+@router.message(Command("smart_search"))
+async def on_smart_search(message: Message, deps: Deps) -> None:
+    query_text = (message.text or "").partition(" ")[2].strip()
+    if not query_text:
+        await message.answer("Использование: /smart_search <запрос>")
+        return
+
+    is_group_chat = message.chat.type in _GROUP_TYPES
+    page = await smart_search(
+        deps,
+        user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        is_group_chat=is_group_chat,
+        query_text=query_text,
+    )
+    await _send_page(message, page.hits, page.has_more, page.session_id)
+    if page.hits and deps.settings.llm_enabled:
+        # 04-search.md's mermaid: "Обычная выдача сразу + пометка «готовлю
+        # умный ответ»" — the synthesis itself is a separate message later,
+        # from the worker (see queue/tasks.py's smart_answer).
+        await message.answer(render_smart_answer_pending())
 
 
 @router.callback_query(F.data.startswith("more:"))
