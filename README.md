@@ -1,77 +1,79 @@
 # Notes Bot
 
-Telegram-бот для сохранения заметок (ссылки и свободный текст) с
-семантическим поиском через embeddings. Поддержка нескольких пользователей и
-общих «комнат» на базе Telegram-групп.
+A Telegram bot for saving notes (links and free-form text) with semantic
+search via embeddings. Supports multiple users and shared "rooms" based on
+Telegram groups.
 
-## Состояние
+## Status
 
-M0 (каркас) + M1 (embedding-сервис) + M2 (текстовые заметки и поиск) + M3
-(ссылки) + M4 (транскрипция) + M5 (LLM-обогащение): можно отправить боту
-текст, ссылку (обычную, YouTube, короткую ссылку карт) или голосовое
-сообщение в личном чате, переключить приватность кнопкой, найти заметку
-`/search`. Голосовые заметки и посты Instagram транскрибируются через
-`faster-whisper` на отдельном тяжёлом воркере (`notes-worker-heavy`), не
-блокируя сохранение обычного текста. Неудачное извлечение не роняет
-заметку, индексируется исходный текст (деградация, см. `03-ingest.md`).
+M0 (scaffold) + M1 (embedding service) + M2 (text notes and search) + M3
+(links) + M4 (transcription) + M5 (LLM enrichment): you can send the bot
+text, a link (a regular page, YouTube, a short maps link), or a voice
+message in a private chat, toggle privacy with a button, find a note with
+`/search`. Voice notes and Instagram posts are transcribed via
+`faster-whisper` on a separate heavy worker (`notes-worker-heavy`), without
+blocking a plain text save. A failed extraction doesn't fail the note — the
+raw text is indexed instead (degradation, see `03-ingest.md`).
 
-После сохранения заметка асинхронно обогащается через ai-proxy (заголовок,
-теги, суммаризация, для карт - структурные поля места, детекция дублей) -
-но `LLM_ENABLED=false` по умолчанию и **должен оставаться `false` в проде**
-до фикса песочницы codex в `poohpeer/ai-proxy` (ADR-14, риск R5 в
-`07-decisions.md`; фикс - `ai-proxy#15`, не смержен). Без него всё работает
-без заголовков и тегов - `NullLLMClient` подставляется автоматически.
+After saving, a note is asynchronously enriched via ai-proxy (title, tags,
+summary, structured place fields for maps, duplicate detection) — but
+`LLM_ENABLED=false` by default and **must stay `false` in production** until
+the codex sandbox fix in `poohpeer/ai-proxy` ships (ADR-14, risk R5 in
+`07-decisions.md`; the fix is `ai-proxy#15`, not merged). Without it,
+everything works without titles and tags — `NullLLMClient` is substituted
+automatically.
 
-M6 (группы и управление заметками): бот работает в группах-«комнатах» -
-сохраняет упоминания и ответы себе (`/capture_all` включает режим "всё",
-предупреждая про privacy mode у BotFather), здоровается при добавлении в
-группу. `/list` и `/trash` (только в личном чате - не транслируют личные
-заметки в группу), удаление с подтверждением, восстановление. Редактирование
-текстовой заметки - через обычное редактирование сообщения в Telegram.
+M6 (groups and note management): the bot works in group "rooms" — saves
+mentions and replies to itself (`/capture_all` turns on "all" mode, warning
+about the bot's privacy mode in BotFather), greets on being added to a
+group. `/list` and `/trash` (private chat only — private notes are never
+broadcast into a group), delete with confirmation, restore. Editing a text
+note works through a regular Telegram message edit.
 
-M7 (`/smart_search`): те же результаты, что и у `/search` (никогда не хуже),
-но следом в очереди `llm` считается синтезированный, со ссылками на заметки
-ответ через ai-proxy (`rag_answer.md`) и приходит отдельным сообщением -
-воркер шлёт его напрямую через Bot API (`TelegramSender`), без общего
-Dispatcher. Ни один этап не переписывает запрос (см. `04-search.md`).
-Деградация: без совпадений, без LLM (`LLM_ENABLED=false`), при ошибке
-ai-proxy или пустом ответе - просто ничего не приходит, `/search`-часть уже
-отработала.
+M7 (`/smart_search`): the same results as `/search` (never worse), but
+followed by a synthesized, source-linked answer via ai-proxy
+(`rag_answer.md`) computed on the `llm` queue and delivered as a separate
+message — the worker sends it directly via the Bot API (`TelegramSender`),
+without a shared Dispatcher. No step rewrites the query (see
+`04-search.md`). Degradation: with no matches, no LLM (`LLM_ENABLED=false`),
+an ai-proxy error, or an empty response — nothing arrives, and the
+`/search` part has already run.
 
-M8 (сборка мусора, импорт старых групп) и M9 (эксплуатация/observability) -
-следующие этапы, см. `docs/architecture/08-roadmap.md`.
+M8 (garbage collection, importing old groups) and M9
+(operations/observability) are the next stages — see
+`docs/architecture/08-roadmap.md`.
 
-Выбор embedding-модели ещё не закрыт - нужен бенчмарк на реальных заметках,
-см. `services/embeddings/README.md`.
+The embedding model choice is still open — needs a benchmark on real notes,
+see `services/embeddings/README.md`.
 
-- [Дизайн-документ](docs/design/notes-bot-design.md) - исходные требования
-- [Архитектура](docs/architecture/README.md) - целевое устройство системы
-- [Этапы имплементации](docs/architecture/08-roadmap.md) - план работ M0-M9
+- [Design document](docs/design/notes-bot-design.md) — original requirements
+- [Architecture](docs/architecture/README.md) — target system design
+- [Implementation stages](docs/architecture/08-roadmap.md) — M0-M9 work plan
 
-## Стек
+## Stack
 
-Python, Postgres + pgvector, Redis + RQ, FastAPI + sentence-transformers для
-эмбеддингов, faster-whisper для транскрипции, Kubernetes.
+Python, Postgres + pgvector, Redis + RQ, FastAPI + sentence-transformers for
+embeddings, faster-whisper for transcription, Kubernetes.
 
-## Разработка
+## Development
 
 ```bash
-uv sync --extra heavy   # --extra heavy подтягивает yt-dlp/faster-whisper
+uv sync --extra heavy   # --extra heavy pulls in yt-dlp/faster-whisper
 uv run pytest -q
 uv run ruff check .
 uv run ruff format .
 ```
 
-Миграции (нужен `DATABASE_URL` с pgvector-инстансом, например
-`pgvector/pgvector:pg16` в Docker):
+Migrations (needs a `DATABASE_URL` pointing at a pgvector instance, e.g.
+`pgvector/pgvector:pg16` in Docker):
 
 ```bash
 uv run alembic upgrade head
-uv run alembic downgrade base   # откат до пустой базы, для проверки downgrade()
+uv run alembic downgrade base   # roll back to an empty database, to check downgrade()
 ```
 
-Большая часть тестов (ACL, репозитории, поиск, бизнес-логика бота) - это
-интеграционные тесты против настоящих Postgres+pgvector и Redis, не моки:
+Most tests (ACL, repositories, search, bot business logic) are integration
+tests against real Postgres+pgvector and Redis, not mocks:
 
 ```bash
 docker run -d --name notes-pg -e POSTGRES_PASSWORD=test -p 5432:5432 pgvector/pgvector:pg16
@@ -82,14 +84,14 @@ DATABASE_URL=postgresql+psycopg://postgres:test@localhost:5432/postgres \
   uv run pytest -q
 ```
 
-Обязательные переменные окружения (см. `notes_bot/config.py` и
+Required environment variables (see `notes_bot/config.py` and
 `docs/architecture/05-contracts.md`): `TELEGRAM_BOT_TOKEN`, `DATABASE_URL`,
-`REDIS_URL`, `EMBEDDINGS_URL`, `EMBEDDING_MODEL_NAME`. Остальные - опциональны,
-дефолты в `config.py`.
+`REDIS_URL`, `EMBEDDINGS_URL`, `EMBEDDING_MODEL_NAME`. The rest are optional,
+with defaults in `config.py`.
 
 ## Docker
 
-Один `Dockerfile`, два таргета - см. `docs/architecture/06-deployment.md`:
+One `Dockerfile`, two targets — see `docs/architecture/06-deployment.md`:
 
 ```bash
 docker build --target app -t notes-bot-app .
@@ -98,16 +100,16 @@ docker build --target app-heavy -t notes-bot-app-heavy .
 
 ## Kubernetes
 
-`deploy/k8s/` - ConfigMap, Job миграций, `notes-embeddings`, `notes-bot`,
-`notes-worker-fast`, `notes-worker-heavy`. `notes-gc` (CronJob) - M8, когда
-появится soft-delete.
+`deploy/k8s/` — ConfigMap, the migration Job, `notes-embeddings`, `notes-bot`,
+`notes-worker-fast`, `notes-worker-heavy`. `notes-gc` (CronJob) lands with
+M8, once soft-delete exists.
 
 ```bash
-kubectl apply -f deploy/k8s/secret.yaml   # скопировать из secret.example.yaml, не коммитить
+kubectl apply -f deploy/k8s/secret.yaml   # copy from secret.example.yaml, never commit it
 kubectl apply -k deploy/k8s/
 ```
 
-Реальное время транскрибации на CPU узла кластера не измерялось - в этом
-окружении нет сети и, соответственно, нет способа прогнать `faster-whisper`
-на реальном аудио (см. риск R2 в `07-decisions.md`). Замерить на первом же
-проде, как и предполагает roadmap.
+Real transcription time on the cluster node's CPU hasn't been measured —
+this environment has no network access, and therefore no way to run
+`faster-whisper` against real audio (see risk R2 in `07-decisions.md`).
+Measure it on the first real deployment, as the roadmap expects.
