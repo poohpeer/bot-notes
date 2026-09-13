@@ -1,0 +1,25 @@
+# Non-secret configuration — see docs/architecture/05-contracts.md,
+# "Конфигурация", and 06-deployment.md, "Секреты и сеть".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notes-bot-config
+data:
+  EMBEDDINGS_URL: "http://notes-embeddings:8000"
+  EMBEDDING_DIM: "768"
+  EMBEDDING_MODEL_NAME: "intfloat/multilingual-e5-base"
+  # ai-proxy has no auth and is not exposed outside the cluster; this is an
+  # internal ClusterIP address, not a secret. Assumes the same namespace as
+  # ai-proxy — otherwise use the namespaced FQDN, see 05-contracts.md.
+  PROXY_AI_URL: "http://ai-proxy:8787"
+  # False until the ai-proxy codex sandbox fix ships — ADR-14, risk R5 in
+  # docs/architecture/07-decisions.md. Flip only after that fix is deployed.
+  LLM_ENABLED: "false"
+  LLM_ENRICH_TIMEOUT_S: "120"
+  LLM_SMART_SEARCH_TIMEOUT_S: "180"
+  WHISPER_MODEL: "small"
+  MAX_AUDIO_SECONDS: "1200"
+  MAX_DOWNLOAD_BYTES: "104857600"
+  SEARCH_CANDIDATE_K: "200"
+  SEARCH_PAGE_SIZE: "5"
+  LOG_LEVEL: "INFO"

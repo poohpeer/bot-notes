@@ -1,0 +1,34 @@
+# Run before rolling any pod that depends on the new schema — never in an
+# initContainer, which would run once per pod and race across replicas. See
+# docs/architecture/06-deployment.md, "Миграции".
+#
+# `kubectl delete job notes-bot-migrate --ignore-not-found` before
+# `kubectl apply -f migrate-job.yaml` if re-running: a Job's spec is
+# immutable once created.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: notes-bot-migrate
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: notes-bot-ghcr-pull-secret
+      containers:
+        - name: migrate
+          image: ghcr.io/poohpeer/bot-notes:latest
+          command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: notes-bot-config
+            - secretRef:
+                name: notes-bot-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
