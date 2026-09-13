@@ -6,11 +6,14 @@ Telegram-бот для сохранения заметок (ссылки и св
 
 ## Состояние
 
-M0 (каркас) + M1 (embedding-сервис): конфигурация, модель данных, миграции,
-CI, сборка образов, `notes-embeddings` (`POST /embed`, `GET /model`).
+M0 (каркас) + M1 (embedding-сервис) + M2 (текстовые заметки и поиск -
+минимальная полезная система): можно отправить боту текст в личном чате,
+переключить приватность кнопкой, найти заметку `/search`, переключить режим
+`/search_mine` / `/search_all`. Ссылки, транскрипция, LLM-обогащение и
+группы - следующие этапы, см. `docs/architecture/08-roadmap.md`.
+
 Выбор embedding-модели ещё не закрыт - нужен бенчмарк на реальных заметках,
-см. `services/embeddings/README.md`. Бот и воркеры пока ничего не делают -
-см. `docs/architecture/08-roadmap.md`.
+см. `services/embeddings/README.md`.
 
 - [Дизайн-документ](docs/design/notes-bot-design.md) - исходные требования
 - [Архитектура](docs/architecture/README.md) - целевое устройство системы
@@ -36,6 +39,18 @@ uv run ruff format .
 ```bash
 uv run alembic upgrade head
 uv run alembic downgrade base   # откат до пустой базы, для проверки downgrade()
+```
+
+Большая часть тестов (ACL, репозитории, поиск, бизнес-логика бота) - это
+интеграционные тесты против настоящих Postgres+pgvector и Redis, не моки:
+
+```bash
+docker run -d --name notes-pg -e POSTGRES_PASSWORD=test -p 5432:5432 pgvector/pgvector:pg16
+docker run -d --name notes-redis -p 6379:6379 redis:7-alpine
+DATABASE_URL=postgresql+psycopg://postgres:test@localhost:5432/postgres \
+  REDIS_URL=redis://localhost:6379/3 \
+  TELEGRAM_BOT_TOKEN=x EMBEDDINGS_URL=http://localhost:9 EMBEDDING_MODEL_NAME=x \
+  uv run pytest -q
 ```
 
 Обязательные переменные окружения (см. `notes_bot/config.py` и

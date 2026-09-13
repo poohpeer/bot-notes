@@ -4,7 +4,10 @@ Which queues it listens to is passed on the command line, since notes-worker-
 fast (fast, llm) and notes-worker-heavy (heavy) share this same image and
 entrypoint — see docs/architecture/06-deployment.md.
 
-Job handlers (process_note, enrich_note, smart_answer) land in M2/M4/M5/M7.
+Job handlers live in notes_bot.queue.tasks; RQ resolves them dynamically by
+dotted path at execution time, so nothing here needs to import them
+directly. `process_note` (M2) exists; `enrich_note`/`smart_answer` land in
+M5/M7.
 """
 
 from __future__ import annotations

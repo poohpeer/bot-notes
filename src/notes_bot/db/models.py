@@ -21,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -97,33 +98,33 @@ class Note(Base):
             "chat_id",
             "tg_message_id",
             unique=True,
-            postgresql_where=(func.text("tg_message_id IS NOT NULL")),
+            postgresql_where=(text("tg_message_id IS NOT NULL")),
         ),
         Index("idx_notes_tags", "tags", postgresql_using="gin"),
         Index(
             "idx_notes_owner_live",
             "user_id",
             "created_at",
-            postgresql_where=(func.text("deleted_at IS NULL")),
+            postgresql_where=(text("deleted_at IS NULL")),
         ),
         Index(
             "idx_notes_chat_live",
             "chat_id",
             "created_at",
-            postgresql_where=(func.text("deleted_at IS NULL")),
+            postgresql_where=(text("deleted_at IS NULL")),
         ),
         Index(
             "idx_notes_trash",
             "user_id",
             "deleted_at",
-            postgresql_where=(func.text("deleted_at IS NOT NULL")),
+            postgresql_where=(text("deleted_at IS NOT NULL")),
         ),
-        Index("idx_notes_gc", "deleted_at", postgresql_where=(func.text("deleted_at IS NOT NULL"))),
+        Index("idx_notes_gc", "deleted_at", postgresql_where=(text("deleted_at IS NOT NULL"))),
         Index(
             "idx_notes_unfinished",
             "status",
             "updated_at",
-            postgresql_where=(func.text("status IN ('pending','processing')")),
+            postgresql_where=(text("status IN ('pending','processing')")),
         ),
     )
 

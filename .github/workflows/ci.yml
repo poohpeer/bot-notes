@@ -29,6 +29,17 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      # M2 onward: ACL/search/task/logic tests exercise the real search
+      # session cache (notes_bot.clients.search_cache), not a mock.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     # Job-level, not per-step: Settings() requires all five with no
     # defaults, and a step missing one fails with a ValidationError that
