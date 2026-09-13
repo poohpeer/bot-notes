@@ -22,7 +22,7 @@ CREATE TABLE notes (
     visibility      TEXT,                     -- 'private' | 'public'; NULL для групповых
 
     -- Контент
-    source_type     TEXT NOT NULL,            -- 'text'|'page'|'youtube'|'instagram'|'map'
+    source_type     TEXT NOT NULL,            -- 'text'|'voice'|'page'|'youtube'|'instagram'|'map'
     source_url      TEXT,
     raw_text        TEXT,                     -- ровно то, что прислал пользователь
     extracted_text  TEXT,                     -- то, что добыли экстракторы
@@ -49,7 +49,7 @@ CREATE TABLE notes (
     CONSTRAINT notes_enrich_status_ck
         CHECK (enrich_status IN ('pending','processing','done','failed','skipped')),
     CONSTRAINT notes_source_type_ck
-        CHECK (source_type IN ('text','page','youtube','instagram','map')),
+        CHECK (source_type IN ('text','voice','page','youtube','instagram','map')),
     -- Ключевой инвариант приватности: групповая заметка не имеет visibility,
     -- личная - обязана иметь. Проверяется базой, а не только кодом.
     CONSTRAINT notes_visibility_ck CHECK (
@@ -114,12 +114,12 @@ CREATE TABLE user_settings (
 CREATE TABLE chat_settings (
     chat_id      BIGINT PRIMARY KEY,
     title        TEXT,
-    capture_mode TEXT NOT NULL DEFAULT 'links_and_replies',
+    capture_mode TEXT NOT NULL DEFAULT 'mentions_and_replies',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT chat_settings_capture_mode_ck
-        CHECK (capture_mode IN ('all','links_and_replies'))
+        CHECK (capture_mode IN ('all','mentions_and_replies'))
 );
 ```
 
@@ -148,6 +148,7 @@ CREATE TABLE chat_settings (
 | `source_type` | Текст для индексации |
 |---|---|
 | `text` | `raw_text` |
+| `voice` | `extracted_text` (транскрипт); `raw_text` содержит подпись к голосовому, если она была |
 | `page` | `extracted_text`, при пустом - `raw_text` (то есть сам URL) |
 | `youtube` | `заголовок + описание + субтитры` (собирается экстрактором в `extracted_text`) |
 | `instagram` | `caption + "\n\n" + транскрипт` (собирается экстрактором в `extracted_text`) |
@@ -200,6 +201,7 @@ CREATE TABLE chat_settings (
 | Индексы по `user_id`, `chat_id`, `deleted_at` | Все три сценария поиска и `/list`, `/trash`, GC фильтруют по ним |
 | `user_settings.default_visibility` | Пользователю, который всё делает публичным, не нужно нажимать кнопку каждый раз |
 | `chat_settings` | Управление шумом в группах, см. `07-decisions.md`, ADR-10 |
+| `source_type = 'voice'` | Голосовые заметки от пользователя, см. `07-decisions.md`, ADR-13 |
 | CHECK-констрейнты | Инварианты приватности и статусов в базе, а не только в коде |
 
 ## Миграции
