@@ -65,6 +65,24 @@ jobs:
       - run: uv run alembic downgrade base
       - run: uv run alembic upgrade head
 
+  test-embeddings:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/embeddings
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - run: uv sync
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
   build:
     needs: test
     if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.test.result != 'failure' }}
@@ -100,6 +118,39 @@ jobs:
             ${{ env.IMAGE_NAME }}-${{ matrix.target }}:v${{ github.run_number }}
             ${{ env.IMAGE_NAME }}-${{ matrix.target }}:latest
             ${{ env.IMAGE_NAME }}-${{ matrix.target }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-embeddings:
+    needs: test-embeddings
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.test-embeddings.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Separate image, separate context: this Dockerfile bakes ~1GB of
+      # model weights into the layer at build time (see its own docstring),
+      # which the app/app-heavy build above never touches.
+      - uses: docker/build-push-action@v7
+        with:
+          context: services/embeddings
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}-embeddings:v${{ github.run_number }}
+            ${{ env.IMAGE_NAME }}-embeddings:latest
+            ${{ env.IMAGE_NAME }}-embeddings:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

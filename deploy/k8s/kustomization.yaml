@@ -5,7 +5,8 @@ resources:
   - configmap.yaml
   # secret.yaml is gitignored and applied by hand — see secret.example.yaml
   - migrate-job.yaml
+  - embeddings.yaml
 
-# Deployments (bot, worker-fast, worker-heavy, embeddings, gc) land with M2
-# onward, once each process does something real — see
-# docs/architecture/08-roadmap.md.
+# Deployments for bot, worker-fast, worker-heavy, gc land with M2 onward,
+# once each process does something real — see docs/architecture/08-roadmap.md.
+# notes-embeddings ships now (M1) because /embed is what M1 delivers.
