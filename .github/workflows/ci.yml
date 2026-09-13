@@ -30,6 +30,18 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+    # Job-level, not per-step: Settings() requires all five with no
+    # defaults, and a step missing one fails with a ValidationError that
+    # looks nothing like "CI is misconfigured" — see the alembic steps below,
+    # which shipped without REDIS_URL/EMBEDDINGS_URL/EMBEDDING_MODEL_NAME the
+    # first time and failed for exactly that reason.
+    env:
+      TELEGRAM_BOT_TOKEN: test-token
+      DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
+      REDIS_URL: redis://localhost:6379/0
+      EMBEDDINGS_URL: http://localhost:9
+      EMBEDDING_MODEL_NAME: test-model
+
     steps:
       - uses: actions/checkout@v5
 
@@ -43,12 +55,6 @@ jobs:
       - run: uv run ruff format --check .
 
       - run: uv run pytest -q
-        env:
-          TELEGRAM_BOT_TOKEN: test-token
-          DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
-          REDIS_URL: redis://localhost:6379/0
-          EMBEDDINGS_URL: http://localhost:9
-          EMBEDDING_MODEL_NAME: test-model
 
       # The real proof M0 asks for: `alembic upgrade head` on a target
       # database — see docs/architecture/08-roadmap.md, M0 "Готово, когда".
@@ -56,17 +62,8 @@ jobs:
       # compatibility rule in 06-deployment.md depends on it working) fails
       # CI instead of surfacing during a rollback.
       - run: uv run alembic upgrade head
-        env:
-          TELEGRAM_BOT_TOKEN: test-token
-          DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
       - run: uv run alembic downgrade base
-        env:
-          TELEGRAM_BOT_TOKEN: test-token
-          DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
       - run: uv run alembic upgrade head
-        env:
-          TELEGRAM_BOT_TOKEN: test-token
-          DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/postgres
 
   build:
     needs: test
