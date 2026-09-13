@@ -254,11 +254,18 @@ class NoteRepository:
     async def list_own(self, user_id: int, *, limit: int, offset: int) -> list[Note]:
         """`/list` — see 04-search.md: "Свои заметки по дате, без
         векторов". Plain SQL pagination, not the search cache: there is no
-        ANN re-ranking to go stale between pages here."""
+        ANN re-ranking to go stale between pages here.
+
+        `Note.id.desc()` is a tiebreaker, not the primary sort: two notes
+        saved in the same transaction (or within Postgres's timestamp
+        resolution) can share `created_at` exactly, which otherwise leaves
+        their relative order — and thus which page a given note lands on —
+        undefined between calls.
+        """
         result = await self._session.execute(
             select(Note)
             .where(Note.user_id == user_id, Note.deleted_at.is_(None))
-            .order_by(Note.created_at.desc())
+            .order_by(Note.created_at.desc(), Note.id.desc())
             .limit(limit)
             .offset(offset)
         )
@@ -268,7 +275,7 @@ class NoteRepository:
         result = await self._session.execute(
             select(Note)
             .where(Note.user_id == user_id, Note.deleted_at.is_not(None))
-            .order_by(Note.deleted_at.desc())
+            .order_by(Note.deleted_at.desc(), Note.id.desc())
             .limit(limit)
             .offset(offset)
         )

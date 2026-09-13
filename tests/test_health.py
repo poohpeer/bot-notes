@@ -59,3 +59,17 @@ async def test_mark_ready_directly_without_a_fresh_get_me_call():
     async with TestClient(TestServer(app)) as client:
         response = await client.get("/readyz")
         assert response.status == 200
+
+
+async def test_metrics_endpoint_serves_prometheus_text_format():
+    """06-deployment.md, "Наблюдаемость": scraped on the same port as the
+    health probes, no separate Service needed."""
+    app = create_health_app(FakeBot())
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/metrics")
+        assert response.status == 200
+        assert response.content_type == "text/plain"
+        body = await response.text()
+        # A couple of this codebase's own metric names, not just any output.
+        assert "notes_search_duration_seconds" in body
+        assert "notes_extractor_failures_total" in body

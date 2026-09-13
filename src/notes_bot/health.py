@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from aiogram import Bot
 from aiohttp import web
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 _READY = web.AppKey("ready", bool)
 
@@ -28,8 +29,17 @@ def create_health_app(bot: Bot) -> web.Application:
             return web.json_response({"status": "not ready"}, status=503)
         return web.json_response({"status": "ok"})
 
+    async def metrics(request: web.Request) -> web.Response:
+        # 06-deployment.md, "Наблюдаемость" — same port as the health
+        # probes, no separate Service/port needed for Prometheus to scrape.
+        # aiohttp's `content_type=` param rejects a value carrying its own
+        # charset (CONTENT_TYPE_LATEST is "text/plain; version=...;
+        # charset=utf-8") — split it so aiohttp sets the header verbatim.
+        return web.Response(body=generate_latest(), headers={"Content-Type": CONTENT_TYPE_LATEST})
+
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
+    app.router.add_get("/metrics", metrics)
     return app
 
 

@@ -27,3 +27,6 @@ data:
   GC_RETENTION_DAYS: "30"
   GC_STUCK_PROCESSING_MINUTES: "30"
   GC_BATCH_SIZE: "500"
+  # notes-worker-fast/-heavy's Prometheus port — notes-bot itself serves
+  # /metrics on HEALTH_PORT instead, see health.py.
+  METRICS_PORT: "9090"

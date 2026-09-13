@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 from redis import Redis
 from rq import Queue
@@ -53,6 +54,12 @@ from notes_bot.extractors.map import MapExtractor
 from notes_bot.extractors.page import PageExtractor
 from notes_bot.extractors.voice import VoiceExtractor
 from notes_bot.extractors.youtube import YoutubeExtractor
+from notes_bot.metrics import (
+    EXTRACTOR_FAILURES_TOTAL,
+    NOTES_ENRICH_FAILED_TOTAL,
+    NOTES_STATUS_FAILED_TOTAL,
+    PROCESS_NOTE_DURATION_SECONDS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -123,11 +130,18 @@ async def _extract_and_get_index_text(
         raise NotImplementedError(f"no extractor registered for source_type={note.source_type!r}")
 
     result = await extractor.extract(note)
+    error = result.meta.get("error")
+    if error:
+        # 06-deployment.md, "Доля ошибок yt-dlp по источникам" — the metric
+        # the doc says "заслуживает алерта": a degraded-but-not-failed
+        # extraction (see this function's own docstring) is exactly the
+        # early signal that a source started blocking scrapes.
+        EXTRACTOR_FAILURES_TOTAL.labels(source_type=note.source_type).inc()
     await note_repo.record_extraction(
         note.id,
         extracted_text=result.text or None,
         lang=result.lang,
-        error=result.meta.get("error"),
+        error=error,
     )
     return result.text or note.raw_text or ""
 
@@ -169,7 +183,12 @@ async def process_note_async(
         chunk_repo = ChunkRepository(session)
         note = await note_repo.get(note_id)
         assert note is not None  # just fetched above; nothing else deletes notes
+        # Captured before any rollback below expires the ORM object —
+        # reading note.source_type afterward would trigger an implicit
+        # (and here, unawaited) lazy-load.
+        source_type = note.source_type
 
+        started = time.perf_counter()
         try:
             text = await _extract_and_get_index_text(note, note_repo, extractors)
             chunks = chunk(text)
@@ -201,6 +220,7 @@ async def process_note_async(
             async with session_factory() as failure_session:
                 await NoteRepository(failure_session).mark_failed(note_id, str(exc))
                 await failure_session.commit()
+            NOTES_STATUS_FAILED_TOTAL.labels(source_type=source_type).inc()
             log.warning(
                 "process_note: note_id=%s failed (retryable=%s): %s",
                 note_id,
@@ -212,7 +232,14 @@ async def process_note_async(
             async with session_factory() as failure_session:
                 await NoteRepository(failure_session).mark_failed(note_id, str(exc))
                 await failure_session.commit()
+            NOTES_STATUS_FAILED_TOTAL.labels(source_type=source_type).inc()
             log.exception("process_note: note_id=%s failed unexpectedly", note_id)
+        finally:
+            # 06-deployment.md, "Время обработки по source_type" —
+            # separately shows the real cost of Whisper.
+            PROCESS_NOTE_DURATION_SECONDS.labels(source_type=source_type).observe(
+                time.perf_counter() - started
+            )
 
 
 def process_note(note_id: int) -> None:
@@ -331,6 +358,7 @@ async def enrich_note_async(
             async with session_factory() as failure_session:
                 await NoteRepository(failure_session).mark_enrich_failed(note_id, str(exc))
                 await failure_session.commit()
+            NOTES_ENRICH_FAILED_TOTAL.inc()
             log.warning(
                 "enrich_note: note_id=%s failed (quota_exhausted=%s, retryable=%s): %s",
                 note_id,
@@ -343,6 +371,7 @@ async def enrich_note_async(
             async with session_factory() as failure_session:
                 await NoteRepository(failure_session).mark_enrich_failed(note_id, str(exc))
                 await failure_session.commit()
+            NOTES_ENRICH_FAILED_TOTAL.inc()
             log.exception("enrich_note: note_id=%s failed unexpectedly", note_id)
 
 

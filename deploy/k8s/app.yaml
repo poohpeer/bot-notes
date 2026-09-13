@@ -19,6 +19,12 @@ spec:
     metadata:
       labels:
         app: notes-bot
+      annotations:
+        # 06-deployment.md, "Наблюдаемость" — /metrics shares the health
+        # port, no separate Service needed.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       terminationGracePeriodSeconds: 30
       imagePullSecrets:
@@ -65,6 +71,10 @@ spec:
     metadata:
       labels:
         app: notes-worker-fast
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
     spec:
       imagePullSecrets:
         - name: notes-bot-ghcr-pull-secret
@@ -74,6 +84,9 @@ spec:
           # fast before llm: user-facing saves take priority over
           # enrichment — see 06-deployment.md.
           command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.worker", "fast", "llm"]
+          ports:
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: notes-bot-config

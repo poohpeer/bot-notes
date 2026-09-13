@@ -23,6 +23,7 @@ from notes_bot.config import get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.health import create_health_app, mark_ready
 from notes_bot.logging_setup import configure_logging
+from notes_bot.metrics import register_queue_length_collector
 from notes_bot.startup import StartupCheckFailed, validate_startup
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,13 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
 
+    # RQ's Queue is sync-only (no asyncio client), so it gets its own plain
+    # redis-py connection alongside the async one used everywhere else — see
+    # notes_bot/queue/queues.py. One connection, two Queue objects: a Queue
+    # is just a named view over it, not its own client.
+    rq_redis = Redis.from_url(settings.redis_url)
+    register_queue_length_collector(rq_redis)
+
     health_app = create_health_app(bot)
     runner = web.AppRunner(health_app)
     await runner.setup()
@@ -56,11 +64,6 @@ async def main() -> None:
         log.error("initial getMe failed: %s", exc)
         raise SystemExit(1) from exc
 
-    # RQ's Queue is sync-only (no asyncio client), so it gets its own plain
-    # redis-py connection alongside the async one used everywhere else — see
-    # notes_bot/queue/queues.py. One connection, two Queue objects: a Queue
-    # is just a named view over it, not its own client.
-    rq_redis = Redis.from_url(settings.redis_url)
     deps = Deps(
         session_factory=create_session_factory(engine),
         embedding_client=HttpEmbeddingClient(
