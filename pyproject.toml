@@ -1,0 +1,56 @@
+[project]
+name = "notes-bot"
+version = "0.1.0"
+description = "Telegram notes bot with semantic search"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "pgvector>=0.3",
+    "alembic>=1.13",
+    "rq>=1.16",
+    "redis>=5.0",
+    "httpx>=0.27",
+    "trafilatura>=1.12",
+    "pydantic-settings>=2.4",
+    "structlog>=24.1",
+]
+
+# app-heavy only: yt-dlp downloads, ffmpeg audio extraction, faster-whisper
+# transcription (M4). Kept out of the base app/fast-worker image — see
+# docs/architecture/06-deployment.md, "Образы".
+[project.optional-dependencies]
+heavy = [
+    "yt-dlp>=2024.8",
+    "faster-whisper>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# docs/ holds Python snippets inside fenced code blocks for illustration —
+# ruff's Markdown formatting would rewrite them as a side effect of `ruff
+# format .` and drift them from the surrounding prose's own style.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/notes_bot"]
