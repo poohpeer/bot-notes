@@ -1,10 +1,14 @@
 """Inline keyboards — pure construction, no aiogram Bot/dispatcher needed to
 build or test one. Callback data formats:
 
-    vis:{note_id}        toggle privacy (ADR-5: flips whatever is stored)
-    more:{session_id}    "show more" pagination, see 04-search.md
-    del:{note_id}        delete, owner-only render (rendered nowhere yet —
-                          /list and deletion land in M6)
+    vis:{note_id}         toggle privacy (ADR-5: flips whatever is stored)
+    more:{session_id}     "show more" search pagination, see 04-search.md
+    listmore:{offset}     "show more" for /list, plain SQL offset
+    trashmore:{offset}    "show more" for /trash, plain SQL offset
+    del:{note_id}         delete — asks for confirmation first
+    delyes:{note_id}      confirmed delete
+    delno:{note_id}       cancelled delete
+    restore:{note_id}     restore from /trash
 """
 
 from __future__ import annotations
@@ -25,5 +29,49 @@ def search_more_keyboard(session_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Показать ещё 5", callback_data=f"more:{session_id}")]
+        ]
+    )
+
+
+def list_item_keyboard(note_id: int) -> InlineKeyboardMarkup:
+    """/list — every item is the caller's own, so a delete button is always
+    safe to render (04-search.md: rendering is a convenience, the real
+    check is the WHERE clause on the mutation itself)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🗑 удалить", callback_data=f"del:{note_id}")]]
+    )
+
+
+def delete_confirm_keyboard(note_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить", callback_data=f"delyes:{note_id}"),
+                InlineKeyboardButton(text="Отмена", callback_data=f"delno:{note_id}"),
+            ]
+        ]
+    )
+
+
+def trash_item_keyboard(note_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="♻️ восстановить", callback_data=f"restore:{note_id}")]
+        ]
+    )
+
+
+def list_more_keyboard(offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Показать ещё", callback_data=f"listmore:{offset}")]
+        ]
+    )
+
+
+def trash_more_keyboard(offset: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Показать ещё", callback_data=f"trashmore:{offset}")]
         ]
     )

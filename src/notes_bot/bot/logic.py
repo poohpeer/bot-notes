@@ -14,7 +14,7 @@ from notes_bot.bot.render import RenderableHit
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.config import Settings
-from notes_bot.db.repositories import NoteRepository, UserSettingsRepository
+from notes_bot.db.repositories import ChatSettingsRepository, NoteRepository, UserSettingsRepository
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.classify import classify_text_message
@@ -33,6 +33,11 @@ class Deps:
     fast_queue: Queue
     heavy_queue: Queue
     settings: Settings
+    # Needed to recognize "@botname" mentions in group messages — see
+    # domain/group_capture.py. Resolved once via getMe at startup
+    # (notes_bot.health.mark_ready_after_get_me already calls it; cli/bot.py
+    # reuses that result rather than calling getMe twice).
+    bot_username: str = ""
 
 
 @dataclass(frozen=True)
@@ -260,3 +265,106 @@ def _to_renderable_from_note(note, chunk_text: str) -> RenderableHit:
         chunk_text=chunk_text,
         is_owner=False,
     )
+
+
+def _to_renderable_own(note) -> RenderableHit:
+    """/list and /trash only ever show the caller's own notes — unlike a
+    search hit, ownership here is a given, not something to check."""
+    return RenderableHit(
+        note_id=note.id,
+        title=note.title,
+        source_type=note.source_type,
+        source_url=note.source_url,
+        tags=note.tags,
+        chunk_text=note.extracted_text or note.raw_text or "",
+        is_owner=True,
+    )
+
+
+@dataclass(frozen=True)
+class NotesPage:
+    hits: list[RenderableHit]
+    has_more: bool
+    next_offset: int
+
+
+async def list_notes(deps: Deps, *, user_id: int, offset: int) -> NotesPage:
+    """`/list` — plain SQL pagination by `created_at`, not the search
+    session cache: there is no ANN ranking here to go stale between pages
+    (04-search.md)."""
+    page_size = deps.settings.search_page_size
+    async with deps.session_factory() as session:
+        # +1 to learn whether another page exists, same trick as search.
+        notes = await NoteRepository(session).list_own(user_id, limit=page_size + 1, offset=offset)
+    has_more = len(notes) > page_size
+    page = notes[:page_size]
+    return NotesPage(
+        hits=[_to_renderable_own(n) for n in page],
+        has_more=has_more,
+        next_offset=offset + page_size,
+    )
+
+
+async def list_trash(deps: Deps, *, user_id: int, offset: int) -> NotesPage:
+    page_size = deps.settings.search_page_size
+    async with deps.session_factory() as session:
+        notes = await NoteRepository(session).list_own_deleted(
+            user_id, limit=page_size + 1, offset=offset
+        )
+    has_more = len(notes) > page_size
+    page = notes[:page_size]
+    return NotesPage(
+        hits=[_to_renderable_own(n) for n in page],
+        has_more=has_more,
+        next_offset=offset + page_size,
+    )
+
+
+async def delete_note(deps: Deps, *, note_id: int, user_id: int) -> bool:
+    async with deps.session_factory() as session:
+        deleted = await NoteRepository(session).soft_delete(note_id, user_id)
+        await session.commit()
+    return deleted
+
+
+async def restore_note(deps: Deps, *, note_id: int, user_id: int) -> bool:
+    async with deps.session_factory() as session:
+        restored = await NoteRepository(session).restore(note_id, user_id)
+        await session.commit()
+    return restored
+
+
+async def edit_note_text(deps: Deps, *, note_id: int, user_id: int, new_text: str) -> bool:
+    """03-ingest.md, "Редактирование": text-only, full re-chunk/re-embed.
+    The note temporarily leaves search results (`status='pending'`) rather
+    than show text that no longer matches its vectors."""
+    async with deps.session_factory() as session:
+        edited = await NoteRepository(session).edit_text(note_id, user_id, new_text)
+        await session.commit()
+    if edited:
+        enqueue_process_note(deps.fast_queue, note_id)
+    return edited
+
+
+async def edit_note_by_message(
+    deps: Deps, *, chat_id: int, tg_message_id: int, user_id: int, new_text: str
+) -> bool:
+    """Triggered by the user editing their original Telegram message
+    in-place, per 03-ingest.md: "пользователь присылает новое сообщение как
+    замену" — the most natural reading of that is an actual Telegram
+    message edit, which needs no new UI and reuses the (chat_id,
+    tg_message_id) pair ADR-8's idempotent insert already keys on."""
+    async with deps.session_factory() as session:
+        note_id = await NoteRepository(session).edit_text_by_message(
+            chat_id=chat_id, tg_message_id=tg_message_id, user_id=user_id, new_text=new_text
+        )
+        await session.commit()
+    if note_id is not None:
+        enqueue_process_note(deps.fast_queue, note_id)
+    return note_id is not None
+
+
+async def set_group_capture_mode(deps: Deps, *, chat_id: int, mode: str) -> None:
+    async with deps.session_factory() as session:
+        await ChatSettingsRepository(session).set_capture_mode(chat_id, mode)
+        await session.commit()

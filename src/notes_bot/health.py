@@ -38,4 +38,11 @@ async def mark_ready_after_get_me(bot: Bot, app: web.Application) -> None:
     `ready` False; the pod stays un-Ready rather than serving traffic it
     can't actually handle."""
     await bot.get_me()
+    mark_ready(app)
+
+
+def mark_ready(app: web.Application) -> None:
+    """For a caller that already has its own successful getMe result (see
+    cli/bot.py, which also needs the bot's username) and would otherwise
+    have to call getMe a second time just for this."""
     app[_READY] = True

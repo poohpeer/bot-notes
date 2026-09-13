@@ -21,7 +21,7 @@ from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.config import get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
-from notes_bot.health import create_health_app, mark_ready_after_get_me
+from notes_bot.health import create_health_app, mark_ready
 from notes_bot.logging_setup import configure_logging
 from notes_bot.startup import StartupCheckFailed, validate_startup
 
@@ -37,6 +37,23 @@ async def main() -> None:
         await validate_startup(settings, engine)
     except StartupCheckFailed as exc:
         log.error("startup check failed: %s", exc)
+        raise SystemExit(1) from exc
+
+    bot = Bot(token=settings.telegram_bot_token)
+
+    health_app = create_health_app(bot)
+    runner = web.AppRunner(health_app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", settings.health_port).start()
+    log.info("health server listening on :%d", settings.health_port)
+
+    try:
+        # bot_username (below) needs the same call readiness does — see
+        # Deps.bot_username's docstring — so this does both in one getMe.
+        me = await bot.get_me()
+        mark_ready(health_app)
+    except Exception as exc:
+        log.error("initial getMe failed: %s", exc)
         raise SystemExit(1) from exc
 
     # RQ's Queue is sync-only (no asyncio client), so it gets its own plain
@@ -55,26 +72,14 @@ async def main() -> None:
         fast_queue=Queue("fast", connection=rq_redis),
         heavy_queue=Queue("heavy", connection=rq_redis),
         settings=settings,
+        bot_username=me.username or "",
     )
 
-    bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
     dp.include_router(router)
     dp["deps"] = deps
 
-    health_app = create_health_app(bot)
-    runner = web.AppRunner(health_app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", settings.health_port).start()
-    log.info("health server listening on :%d", settings.health_port)
-
-    try:
-        await mark_ready_after_get_me(bot, health_app)
-    except Exception as exc:
-        log.error("initial getMe failed: %s", exc)
-        raise SystemExit(1) from exc
-
-    log.info("notes-bot starting up")
+    log.info("notes-bot starting up as @%s", me.username)
     await dp.start_polling(bot)
 
 

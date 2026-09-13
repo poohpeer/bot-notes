@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from notes_bot.db.repositories import (
+    ChatSettingsRepository,
     ChunkRepository,
     NewChunk,
     NoteRepository,
@@ -297,3 +298,217 @@ async def test_get_first_chunk_embedding_returns_none_without_chunks(db_session)
         user_id=1, chat_id=1, is_group=False, tg_message_id=205, raw_text="x", visibility="private"
     )
     assert await chunk_repo.get_first_chunk_embedding(note.id) is None
+
+
+async def test_set_capture_mode_then_get_returns_it(db_session):
+    repo = ChatSettingsRepository(db_session)
+    await repo.set_capture_mode(555, "all")
+    assert await repo.get_capture_mode(555) == "all"
+
+
+async def test_get_capture_mode_defaults_to_mentions_and_replies(db_session):
+    repo = ChatSettingsRepository(db_session)
+    assert await repo.get_capture_mode(999) == "mentions_and_replies"
+
+
+async def test_set_capture_mode_is_idempotent(db_session):
+    repo = ChatSettingsRepository(db_session)
+    await repo.set_capture_mode(555, "all")
+    await repo.set_capture_mode(555, "mentions_and_replies")
+    assert await repo.get_capture_mode(555) == "mentions_and_replies"
+
+
+async def test_list_own_returns_notes_newest_first(db_session):
+    repo = NoteRepository(db_session)
+    first = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=300, raw_text="a", visibility="private"
+    )
+    second = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=301, raw_text="b", visibility="private"
+    )
+    notes = await repo.list_own(1, limit=10, offset=0)
+    assert [n.id for n in notes] == [second.id, first.id]
+
+
+async def test_list_own_excludes_deleted_and_other_users(db_session):
+    repo = NoteRepository(db_session)
+    mine = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=302, raw_text="a", visibility="private"
+    )
+    deleted = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=303, raw_text="b", visibility="private"
+    )
+    await repo.soft_delete(deleted.id, 1)
+    await repo.create_text_note(
+        user_id=2, chat_id=2, is_group=False, tg_message_id=304, raw_text="c", visibility="private"
+    )
+    notes = await repo.list_own(1, limit=10, offset=0)
+    assert [n.id for n in notes] == [mine.id]
+
+
+async def test_list_own_respects_limit_and_offset(db_session):
+    repo = NoteRepository(db_session)
+    for i in range(5):
+        await repo.create_text_note(
+            user_id=1,
+            chat_id=1,
+            is_group=False,
+            tg_message_id=400 + i,
+            raw_text=str(i),
+            visibility="private",
+        )
+    page1 = await repo.list_own(1, limit=2, offset=0)
+    page2 = await repo.list_own(1, limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {n.id for n in page1}.isdisjoint({n.id for n in page2})
+
+
+async def test_soft_delete_then_list_own_deleted(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=500, raw_text="a", visibility="private"
+    )
+    assert await repo.soft_delete(note.id, 1) is True
+    deleted = await repo.list_own_deleted(1, limit=10, offset=0)
+    assert [n.id for n in deleted] == [note.id]
+
+
+async def test_soft_delete_refuses_a_different_user(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=501, raw_text="a", visibility="private"
+    )
+    assert await repo.soft_delete(note.id, 999) is False
+    assert (await repo.get(note.id)).deleted_at is None
+
+
+async def test_soft_delete_twice_returns_false_the_second_time(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=502, raw_text="a", visibility="private"
+    )
+    assert await repo.soft_delete(note.id, 1) is True
+    assert await repo.soft_delete(note.id, 1) is False
+
+
+async def test_restore_brings_a_note_back(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=503, raw_text="a", visibility="private"
+    )
+    await repo.soft_delete(note.id, 1)
+    assert await repo.restore(note.id, 1) is True
+    # Two prior bulk UPDATEs push the identity-mapped `note` into
+    # SQLAlchemy's "expired" state; a plain attribute read would then try
+    # an implicit lazy-load outside of an awaited context. An explicit
+    # refresh avoids that — see SQLAlchemy's async session caveats.
+    await db_session.refresh(note)
+    assert note.deleted_at is None
+
+
+async def test_restore_refuses_a_different_user(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=504, raw_text="a", visibility="private"
+    )
+    await repo.soft_delete(note.id, 1)
+    assert await repo.restore(note.id, 999) is False
+
+
+async def test_restore_on_a_non_deleted_note_returns_false(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=505, raw_text="a", visibility="private"
+    )
+    assert await repo.restore(note.id, 1) is False
+
+
+async def test_edit_text_updates_raw_text_and_resets_status(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=506,
+        raw_text="old",
+        visibility="private",
+    )
+    await repo.mark_done(note.id)
+    assert await repo.edit_text(note.id, 1, "new text") is True
+    refreshed = await repo.get(note.id)
+    assert refreshed.raw_text == "new text"
+    assert refreshed.status == "pending"
+
+
+async def test_edit_text_refuses_a_different_user(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=507,
+        raw_text="old",
+        visibility="private",
+    )
+    assert await repo.edit_text(note.id, 999, "new text") is False
+    assert (await repo.get(note.id)).raw_text == "old"
+
+
+async def test_edit_text_refuses_a_non_text_note(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=508,
+        source_type="page",
+        source_url="https://example.com",
+        raw_text="https://example.com",
+        visibility="private",
+    )
+    assert await repo.edit_text(note.id, 1, "new text") is False
+
+
+async def test_edit_text_by_message_finds_the_note_and_returns_its_id(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=600,
+        raw_text="old",
+        visibility="private",
+    )
+    await repo.mark_done(note.id)
+    note_id = await repo.edit_text_by_message(
+        chat_id=1, tg_message_id=600, user_id=1, new_text="edited"
+    )
+    assert note_id == note.id
+    refreshed = await repo.get(note.id)
+    assert refreshed.raw_text == "edited"
+    assert refreshed.status == "pending"
+
+
+async def test_edit_text_by_message_refuses_a_different_user(db_session):
+    repo = NoteRepository(db_session)
+    await repo.create_text_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=601,
+        raw_text="old",
+        visibility="private",
+    )
+    note_id = await repo.edit_text_by_message(
+        chat_id=1, tg_message_id=601, user_id=999, new_text="edited"
+    )
+    assert note_id is None
+
+
+async def test_edit_text_by_message_returns_none_for_an_unknown_message(db_session):
+    repo = NoteRepository(db_session)
+    note_id = await repo.edit_text_by_message(
+        chat_id=1, tg_message_id=99999, user_id=1, new_text="edited"
+    )
+    assert note_id is None

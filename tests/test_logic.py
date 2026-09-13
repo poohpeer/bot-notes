@@ -9,15 +9,23 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.bot.logic import (
     Deps,
+    delete_note,
+    edit_note_by_message,
+    edit_note_text,
+    list_notes,
+    list_trash,
+    restore_note,
     run_search,
     save_note,
     save_voice_note,
+    set_group_capture_mode,
     show_more,
     toggle_privacy,
 )
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
+from notes_bot.db.repositories import ChatSettingsRepository
 
 pytestmark = pytest.mark.asyncio
 
@@ -171,6 +179,100 @@ async def test_toggle_privacy(deps):
     saved = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=13, text="x")
     new_vis = await toggle_privacy(deps, note_id=saved.note_id, user_id=1)
     assert new_vis == "public"
+
+
+async def test_list_notes_returns_own_notes_newest_first(deps):
+    first = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=30, text="a")
+    second = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=31, text="b")
+    page = await list_notes(deps, user_id=1, offset=0)
+    assert [h.note_id for h in page.hits] == [second.note_id, first.note_id]
+    assert page.has_more is False
+
+
+async def test_list_notes_has_more_when_over_page_size(deps):
+    for i in range(3):  # SEARCH_PAGE_SIZE=2
+        await save_note(
+            deps, user_id=1, chat_id=1, is_group=False, tg_message_id=40 + i, text=str(i)
+        )
+    page = await list_notes(deps, user_id=1, offset=0)
+    assert len(page.hits) == 2
+    assert page.has_more is True
+    assert page.next_offset == 2
+
+
+async def test_list_notes_excludes_other_users(deps):
+    await save_note(deps, user_id=2, chat_id=2, is_group=False, tg_message_id=50, text="not mine")
+    page = await list_notes(deps, user_id=1, offset=0)
+    assert page.hits == []
+
+
+async def test_delete_note_then_it_is_gone_from_list_and_in_trash(deps):
+    saved = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=60, text="x")
+    assert await delete_note(deps, note_id=saved.note_id, user_id=1) is True
+
+    listed = await list_notes(deps, user_id=1, offset=0)
+    assert saved.note_id not in [h.note_id for h in listed.hits]
+
+    trash = await list_trash(deps, user_id=1, offset=0)
+    assert [h.note_id for h in trash.hits] == [saved.note_id]
+
+
+async def test_delete_note_refuses_a_different_user(deps):
+    saved = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=61, text="x")
+    assert await delete_note(deps, note_id=saved.note_id, user_id=999) is False
+
+
+async def test_restore_note_brings_it_back(deps):
+    saved = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=62, text="x")
+    await delete_note(deps, note_id=saved.note_id, user_id=1)
+    assert await restore_note(deps, note_id=saved.note_id, user_id=1) is True
+
+    listed = await list_notes(deps, user_id=1, offset=0)
+    assert [h.note_id for h in listed.hits] == [saved.note_id]
+
+
+async def test_edit_note_text_re_enqueues_processing(deps):
+    saved = await save_note(
+        deps, user_id=1, chat_id=1, is_group=False, tg_message_id=63, text="old"
+    )
+    deps.fast_queue.calls.clear()
+
+    assert await edit_note_text(deps, note_id=saved.note_id, user_id=1, new_text="new") is True
+    assert len(deps.fast_queue.calls) == 1
+    assert deps.fast_queue.calls[0][2] == f"process_note:{saved.note_id}"
+
+
+async def test_edit_note_text_refuses_a_different_user(deps):
+    saved = await save_note(
+        deps, user_id=1, chat_id=1, is_group=False, tg_message_id=64, text="old"
+    )
+    assert await edit_note_text(deps, note_id=saved.note_id, user_id=999, new_text="new") is False
+
+
+async def test_edit_note_by_message_re_enqueues_processing(deps):
+    await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=65, text="old")
+    deps.fast_queue.calls.clear()
+
+    edited = await edit_note_by_message(
+        deps, chat_id=1, tg_message_id=65, user_id=1, new_text="new"
+    )
+    assert edited is True
+    assert len(deps.fast_queue.calls) == 1
+
+
+async def test_edit_note_by_message_refuses_a_different_user(deps):
+    await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=66, text="old")
+    edited = await edit_note_by_message(
+        deps, chat_id=1, tg_message_id=66, user_id=999, new_text="new"
+    )
+    assert edited is False
+
+
+async def test_set_group_capture_mode_persists(deps, db_engine):
+    await set_group_capture_mode(deps, chat_id=777, mode="all")
+    sf = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sf() as session:
+        assert await ChatSettingsRepository(session).get_capture_mode(777) == "all"
 
 
 async def test_save_note_classifies_a_page_url_and_enqueues_it(deps):

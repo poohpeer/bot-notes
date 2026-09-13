@@ -71,6 +71,65 @@ def render_voice_note_saved(*, visibility: str) -> str:
     return f"Распознаю голосовое... Заметка {label}."
 
 
+def render_group_note_saved() -> str:
+    """Group notes have no visibility to report — see ADR-5/ADR-10. R11 in
+    07-decisions.md: an understandable reply on every save is what keeps
+    group members from thinking a mention silently did nothing."""
+    return "Сохранил в заметки комнаты."
+
+
+def render_group_welcome() -> str:
+    return (
+        "Привет! Я сохраняю заметки с поиском по смыслу. В этой группе я "
+        "запоминаю только то, что адресовано мне — упомяните меня (@) или "
+        "ответьте на моё сообщение, и я сохраню текст. Обычный разговор "
+        "участников я не трогаю."
+    )
+
+
+def render_capture_mode_changed(mode: str) -> str:
+    if mode == "all":
+        return (
+            "Режим сохранения: всё. Буду сохранять каждое сообщение в этой "
+            "группе — но для этого нужно выключить privacy mode у бота в "
+            "BotFather (/setprivacy → Disable), иначе Telegram не покажет "
+            "мне обычные сообщения без упоминания."
+        )
+    return "Режим сохранения: только упоминания и ответы мне."
+
+
+def render_list_empty() -> str:
+    return "Заметок пока нет."
+
+
+def render_trash_empty() -> str:
+    return "Корзина пуста."
+
+
+def render_delete_confirmation_prompt() -> str:
+    return "Удалить эту заметку?"
+
+
+def render_note_deleted() -> str:
+    return "Удалено. Можно восстановить из /trash."
+
+
+def render_delete_refused() -> str:
+    return "Не получилось удалить — заметка уже не ваша или уже удалена."
+
+
+def render_note_restored() -> str:
+    return "Восстановлено."
+
+
+def render_edit_saved() -> str:
+    return "Текст обновлён, переиндексирую."
+
+
+def render_edit_refused() -> str:
+    return "Не получилось изменить — заметка не ваша или её нельзя редактировать."
+
+
 def _truncate(text: str, max_len: int) -> str:
     text = text.strip()
     if len(text) <= max_len:
