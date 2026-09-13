@@ -66,6 +66,11 @@ def render_note_saved(*, visibility: str) -> str:
     return f"Сохраняю... Заметка {label}."
 
 
+def render_voice_note_saved(*, visibility: str) -> str:
+    label = "приватная 🔒" if visibility == "private" else "публичная 🌐"
+    return f"Распознаю голосовое... Заметка {label}."
+
+
 def _truncate(text: str, max_len: int) -> str:
     text = text.strip()
     if len(text) <= max_len:

@@ -7,7 +7,14 @@ import pytest
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from notes_bot.bot.logic import Deps, run_search, save_note, show_more, toggle_privacy
+from notes_bot.bot.logic import (
+    Deps,
+    run_search,
+    save_note,
+    save_voice_note,
+    show_more,
+    toggle_privacy,
+)
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
@@ -88,6 +95,7 @@ def deps(db_engine, redis_client):
         embedding_client=FakeEmbeddingClient(),
         search_cache=SearchSessionCache(redis_client),
         fast_queue=FakeQueue(),
+        heavy_queue=FakeQueue(),
         settings=_settings(),
     )
 
@@ -205,9 +213,9 @@ async def test_save_note_stores_the_source_url_for_a_link(deps, db_engine):
         assert note.source_url == "https://example.com/article"
 
 
-async def test_save_note_does_not_enqueue_an_instagram_link_to_fast_queue(deps):
-    """No heavy queue/worker is wired yet (M4) — the note is saved but
-    nothing runs it until M4 adds a consumer."""
+async def test_save_note_routes_an_instagram_link_to_the_heavy_queue(deps):
+    """03-ingest.md, "Шаг 2": instagram и voice → heavy, всё остальное →
+    fast."""
     result = await save_note(
         deps,
         user_id=1,
@@ -219,6 +227,79 @@ async def test_save_note_does_not_enqueue_an_instagram_link_to_fast_queue(deps):
     assert result.source_type == "instagram"
     assert result.created is True
     assert deps.fast_queue.calls == []
+    assert len(deps.heavy_queue.calls) == 1
+
+
+async def test_save_voice_note_uses_file_id_as_source_url_and_caption_as_raw_text(deps, db_engine):
+    result = await save_voice_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=20,
+        file_id="AwACAgIAAx",
+        caption="a caption",
+    )
+    assert result.created is True
+    assert result.source_type == "voice"
+
+    sf = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sf() as session:
+        note = await session.get(Note, result.note_id)
+        assert note.source_url == "AwACAgIAAx"
+        assert note.raw_text == "a caption"
+
+
+async def test_save_voice_note_routes_to_the_heavy_queue(deps):
+    result = await save_voice_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=21,
+        file_id="AwACAgIAAx",
+        caption=None,
+    )
+    assert result.created is True
+    assert deps.fast_queue.calls == []
+    assert len(deps.heavy_queue.calls) == 1
+
+
+async def test_save_voice_note_group_note_has_no_visibility(deps):
+    result = await save_voice_note(
+        deps,
+        user_id=1,
+        chat_id=999,
+        is_group=True,
+        tg_message_id=22,
+        file_id="AwACAgIAAx",
+        caption=None,
+    )
+    assert result.visibility is None
+
+
+async def test_save_voice_note_duplicate_is_not_created(deps):
+    first = await save_voice_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=23,
+        file_id="AwACAgIAAx",
+        caption=None,
+    )
+    second = await save_voice_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=23,
+        file_id="AwACAgIAAx",
+        caption=None,
+    )
+    assert first.created is True
+    assert second.created is False
+    assert len(deps.heavy_queue.calls) == 1
 
 
 async def test_run_search_caches_a_session_and_returns_first_page(deps, db_engine):

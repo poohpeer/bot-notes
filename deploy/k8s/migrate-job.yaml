@@ -18,7 +18,12 @@ spec:
         - name: notes-bot-ghcr-pull-secret
       containers:
         - name: migrate
-          image: ghcr.io/poohpeer/bot-notes:latest
+          # `-app`, not `bot-notes:latest` — that tag was never published;
+          # CI's build matrix (.github/workflows/ci.yml) names images
+          # `bot-notes-<target>`, matching services/embeddings' own
+          # `bot-notes-embeddings`. Either app image has alembic +
+          # migrations/; app is the smaller pull.
+          image: ghcr.io/poohpeer/bot-notes-app:latest
           command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
           envFrom:
             - configMapRef:

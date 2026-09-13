@@ -20,10 +20,8 @@ from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.classify import classify_text_message
 from notes_bot.queue.queues import enqueue_process_note
 
-# instagram and voice go to `heavy` (M4) — see 03-ingest.md, "Шаг 2. Приём
-# в боте": "Выбрать очередь: instagram и voice → heavy, всё остальное →
-# fast". Voice messages aren't classified here at all (that's a Telegram
-# message *type*, decided before this runs, and isn't wired in until M4).
+# instagram and voice go to `heavy` — see 03-ingest.md, "Шаг 2. Приём в
+# боте": "Выбрать очередь: instagram и voice → heavy, всё остальное → fast".
 _HEAVY_SOURCE_TYPES = {"instagram", "voice"}
 
 
@@ -33,6 +31,7 @@ class Deps:
     embedding_client: HttpEmbeddingClient
     search_cache: SearchSessionCache
     fast_queue: Queue
+    heavy_queue: Queue
     settings: Settings
 
 
@@ -53,9 +52,6 @@ async def save_note(
 
     Source type is classified from the message text (03-ingest.md, "Шаг 1")
     — a URL routes to page/youtube/map/instagram, plain text stays 'text'.
-    An instagram link is accepted and saved like any other note, but has no
-    extractor wired in yet (M4) — it settles as `status='failed'`, same as
-    any other extraction failure, rather than being refused up front.
     """
     classification = classify_text_message(text)
 
@@ -81,14 +77,10 @@ async def save_note(
         # ADR-8: a retried Telegram delivery for a message already saved.
         return SaveNoteResult(created=False, note_id=None, visibility=None)
 
-    if classification.source_type in _HEAVY_SOURCE_TYPES:
-        # No heavy queue/worker is wired in this deployment stage yet (M4)
-        # — nothing consumes it, so the note just sits pending. Saving is
-        # still correct: nothing is lost, and M4 only needs to add a
-        # consumer, not touch how the note got here.
-        pass
-    else:
-        enqueue_process_note(deps.fast_queue, note.id)
+    target_queue = (
+        deps.heavy_queue if classification.source_type in _HEAVY_SOURCE_TYPES else deps.fast_queue
+    )
+    enqueue_process_note(target_queue, note.id)
 
     return SaveNoteResult(
         created=True,
@@ -96,6 +88,47 @@ async def save_note(
         visibility=visibility,
         source_type=classification.source_type,
     )
+
+
+async def save_voice_note(
+    deps: Deps,
+    *,
+    user_id: int,
+    chat_id: int,
+    is_group: bool,
+    tg_message_id: int,
+    file_id: str,
+    caption: str | None,
+) -> SaveNoteResult:
+    """A voice message is a Telegram message *type*, not a URL to classify
+    — the bot layer already knows it's `source_type='voice'` before this
+    runs. `file_id` goes in source_url (see VoiceExtractor's docstring for
+    why); `caption`, if any, is what gets edited/re-chunked on a later text
+    edit — the transcript itself never is (03-ingest.md: editing is
+    text-only)."""
+    async with deps.session_factory() as session:
+        visibility: str | None = None
+        if not is_group:
+            settings_row = await UserSettingsRepository(session).get_or_create(user_id)
+            visibility = settings_row.default_visibility
+
+        note = await NoteRepository(session).create_note(
+            user_id=user_id,
+            chat_id=chat_id,
+            is_group=is_group,
+            tg_message_id=tg_message_id,
+            source_type="voice",
+            source_url=file_id,
+            raw_text=caption,
+            visibility=visibility,
+        )
+        await session.commit()
+
+    if note is None:
+        return SaveNoteResult(created=False, note_id=None, visibility=None)
+
+    enqueue_process_note(deps.heavy_queue, note.id)
+    return SaveNoteResult(created=True, note_id=note.id, visibility=visibility, source_type="voice")
 
 
 async def toggle_privacy(deps: Deps, *, note_id: int, user_id: int) -> str | None:

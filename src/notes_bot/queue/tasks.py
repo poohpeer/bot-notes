@@ -1,13 +1,20 @@
 """RQ job functions — see docs/architecture/03-ingest.md and 08-roadmap.md.
 
 RQ runs job functions synchronously; each wraps an async implementation via
-`asyncio.run`, per job. Dependencies (engine, embedding client) are built
-lazily and cached at module scope — the worker process constructs them once
-and reuses them across jobs, rather than reconnecting per note.
+`asyncio.run`, per job. Dependencies (engine, embedding client, extractors)
+are built lazily and cached at module scope — the worker process constructs
+them once and reuses them across jobs, rather than reconnecting per note.
 
-M3 scope: 'text' (no extractor), 'page', 'youtube', 'map'. 'voice' and
-'instagram' are M4 (heavy queue, not wired here yet) and raise
-NotImplementedError rather than silently mis-indexing them.
+`process_note` is the same job function for every source_type; only which
+*queue* a note lands in decides whether a fast or heavy worker (and thus
+which Docker image — see 06-deployment.md) ever picks it up. A heavy-only
+extractor (voice, instagram) can safely live in this module even though it's
+imported by the plain `app` image too: its heavy dependencies
+(faster-whisper, real yt-dlp media download) are only ever imported lazily,
+inside the client classes themselves, the first time a job actually needs
+them — see clients/transcribe.py's module docstring. A fast worker never
+receives a heavy-queued job in the first place, so that import never
+happens there.
 """
 
 from __future__ import annotations
@@ -18,29 +25,25 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
+from notes_bot.clients.telegram_files import TelegramFileClient
+from notes_bot.clients.transcribe import FasterWhisperClient
 from notes_bot.config import Settings, get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.db.models import Note
 from notes_bot.db.repositories import ChunkRepository, NoteRepository
 from notes_bot.domain.chunking import chunk
 from notes_bot.extractors.base import Extractor
+from notes_bot.extractors.instagram import InstagramExtractor
 from notes_bot.extractors.map import MapExtractor
 from notes_bot.extractors.page import PageExtractor
+from notes_bot.extractors.voice import VoiceExtractor
 from notes_bot.extractors.youtube import YoutubeExtractor
 
 log = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker | None = None
-
-# Instantiated once and reused — each extractor is stateless (or only holds
-# injected clients), same rationale as the engine/session_factory caching
-# below.
-_EXTRACTORS: dict[str, Extractor] = {
-    "page": PageExtractor(),
-    "youtube": YoutubeExtractor(),
-    "map": MapExtractor(),
-}
+_extractors: dict[str, Extractor] | None = None
 
 
 def _get_session_factory(settings: Settings) -> async_sessionmaker:
@@ -49,6 +52,32 @@ def _get_session_factory(settings: Settings) -> async_sessionmaker:
         _engine = create_engine(settings)
         _session_factory = create_session_factory(_engine)
     return _session_factory
+
+
+def _get_extractors(settings: Settings) -> dict[str, Extractor]:
+    """Built once per process and reused — each extractor is stateless (or
+    only holds injected clients). One FasterWhisperClient instance is
+    shared between voice and instagram so the model, once loaded, is loaded
+    only once per worker — see clients/transcribe.py.
+    """
+    global _extractors
+    if _extractors is None:
+        transcription_client = FasterWhisperClient(model_size=settings.whisper_model)
+        file_client = TelegramFileClient(settings.telegram_bot_token)
+        _extractors = {
+            "page": PageExtractor(),
+            "youtube": YoutubeExtractor(),
+            "map": MapExtractor(),
+            "voice": VoiceExtractor(
+                file_client=file_client, transcription_client=transcription_client
+            ),
+            "instagram": InstagramExtractor(
+                transcription_client=transcription_client,
+                max_download_bytes=settings.max_download_bytes,
+                max_audio_seconds=settings.max_audio_seconds,
+            ),
+        }
+    return _extractors
 
 
 async def _extract_and_get_index_text(
@@ -68,9 +97,7 @@ async def _extract_and_get_index_text(
 
     extractor = extractors.get(note.source_type)
     if extractor is None:
-        raise NotImplementedError(
-            f"source_type={note.source_type!r} is not indexed yet — lands in M4"
-        )
+        raise NotImplementedError(f"no extractor registered for source_type={note.source_type!r}")
 
     result = await extractor.extract(note)
     await note_repo.record_extraction(
@@ -89,7 +116,11 @@ async def process_note_async(
     embedding_client: HttpEmbeddingClient,
     extractors: dict[str, Extractor] | None = None,
 ) -> None:
-    extractors = extractors if extractors is not None else _EXTRACTORS
+    # Empty, not a module-level default: a 'text' note never consults this
+    # (see _extract_and_get_index_text), and every other source_type is
+    # expected to pass its own — process_note() below always does, built
+    # from settings via _get_extractors().
+    extractors = extractors if extractors is not None else {}
     async with session_factory() as session:
         note_repo = NoteRepository(session)
         note = await note_repo.get(note_id)
@@ -164,6 +195,9 @@ def process_note(note_id: int) -> None:
     )
     asyncio.run(
         process_note_async(
-            note_id, session_factory=session_factory, embedding_client=embedding_client
+            note_id,
+            session_factory=session_factory,
+            embedding_client=embedding_client,
+            extractors=_get_extractors(settings),
         )
     )
