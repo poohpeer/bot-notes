@@ -30,20 +30,23 @@ class NoteRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def create_text_note(
+    async def create_note(
         self,
         *,
         user_id: int,
         chat_id: int,
         is_group: bool,
         tg_message_id: int | None,
-        raw_text: str,
+        source_type: str,
+        source_url: str | None = None,
+        raw_text: str | None,
         visibility: str | None,
     ) -> Note | None:
-        """Insert a pending text note. Returns None on a duplicate delivery
-        (same chat_id + tg_message_id) — ADR-8: idempotency is a database
-        constraint (`uq_notes_tg_message`), not a pre-check, so a retried
-        Telegram update or a bot restart mid-processing never double-saves.
+        """Insert a pending note of any source_type. Returns None on a
+        duplicate delivery (same chat_id + tg_message_id) — ADR-8:
+        idempotency is a database constraint (`uq_notes_tg_message`), not a
+        pre-check, so a retried Telegram update or a bot restart
+        mid-processing never double-saves.
         """
         stmt = (
             pg_insert(Note)
@@ -53,7 +56,8 @@ class NoteRepository:
                 is_group=is_group,
                 tg_message_id=tg_message_id,
                 visibility=visibility,
-                source_type="text",
+                source_type=source_type,
+                source_url=source_url,
                 raw_text=raw_text,
                 status="pending",
             )
@@ -70,6 +74,42 @@ class NoteRepository:
         result = await self._session.execute(stmt)
         row = result.scalar_one_or_none()
         return row
+
+    async def create_text_note(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        is_group: bool,
+        tg_message_id: int | None,
+        raw_text: str,
+        visibility: str | None,
+    ) -> Note | None:
+        """Thin wrapper kept for the many callers (and tests) that only ever
+        made plain text notes before create_note grew source_type/source_url
+        for M3's links."""
+        return await self.create_note(
+            user_id=user_id,
+            chat_id=chat_id,
+            is_group=is_group,
+            tg_message_id=tg_message_id,
+            source_type="text",
+            raw_text=raw_text,
+            visibility=visibility,
+        )
+
+    async def record_extraction(
+        self, note_id: int, *, extracted_text: str | None, lang: str | None, error: str | None
+    ) -> None:
+        """Persists what an extractor found, before chunking runs. `error`
+        is set even on a degraded-but-not-failed note (03-ingest.md,
+        "Деградация") — it explains *why* extracted_text is empty without
+        making the note unfindable, which only `status='failed'` does."""
+        await self._session.execute(
+            update(Note)
+            .where(Note.id == note_id)
+            .values(extracted_text=extracted_text, lang=lang, error=error)
+        )
 
     async def get(self, note_id: int) -> Note | None:
         return await self._session.get(Note, note_id)

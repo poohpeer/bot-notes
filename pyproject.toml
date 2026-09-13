@@ -15,14 +15,21 @@ dependencies = [
     "trafilatura>=1.12",
     "pydantic-settings>=2.4",
     "structlog>=24.1",
+    # Metadata-only YouTube extraction runs on the `fast` queue (see
+    # 03-ingest.md's extractor table), which uses this plain `app` image,
+    # not app-heavy — corrects 06-deployment.md's image table, which listed
+    # yt-dlp as an app-heavy-only addition without accounting for that.
+    # yt-dlp itself needs no ffmpeg for metadata-only calls; only actual
+    # media download/remux (instagram, M4) does.
+    "yt-dlp>=2024.8",
+    "youtube-transcript-api>=0.6",
 ]
 
-# app-heavy only: yt-dlp downloads, ffmpeg audio extraction, faster-whisper
-# transcription (M4). Kept out of the base app/fast-worker image — see
+# app-heavy only: ffmpeg audio extraction, faster-whisper transcription
+# (M4). Kept out of the base app/fast-worker image — see
 # docs/architecture/06-deployment.md, "Образы".
 [project.optional-dependencies]
 heavy = [
-    "yt-dlp>=2024.8",
     "faster-whisper>=1.0",
 ]
 

@@ -154,3 +154,62 @@ async def test_user_settings_get_or_create_is_idempotent(db_session):
     first = await repo.get_or_create(user_id=42)
     second = await repo.get_or_create(user_id=42)
     assert first.user_id == second.user_id
+
+
+async def test_create_note_with_a_source_url(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=100,
+        source_type="page",
+        source_url="https://example.com/article",
+        raw_text="https://example.com/article",
+        visibility="private",
+    )
+    assert note is not None
+    assert note.source_type == "page"
+    assert note.source_url == "https://example.com/article"
+
+
+async def test_record_extraction_sets_text_lang_and_error(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=101,
+        source_type="page",
+        source_url="https://example.com/article",
+        raw_text="https://example.com/article",
+        visibility="private",
+    )
+    await repo.record_extraction(note.id, extracted_text="the page text", lang="ru", error=None)
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.extracted_text == "the page text"
+    assert refreshed.lang == "ru"
+    assert refreshed.error is None
+
+
+async def test_record_extraction_can_record_a_degraded_note(db_session):
+    """extracted_text stays NULL and error explains why — but status is the
+    caller's call, not this method's (03-ingest.md: still 'done', not
+    'failed', as long as raw_text can be indexed)."""
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=102,
+        source_type="page",
+        source_url="https://example.com/blocked",
+        raw_text="https://example.com/blocked",
+        visibility="private",
+    )
+    await repo.record_extraction(note.id, extracted_text=None, lang=None, error="blocked address")
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.extracted_text is None
+    assert refreshed.error == "blocked address"

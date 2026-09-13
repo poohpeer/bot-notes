@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -57,7 +59,27 @@ async def factory(db_engine):
             created_ids.append(note.id)
             return note.id
 
+    async def insert_pending_note(
+        *, source_type: str, source_url: str | None = None, raw_text: str | None = ""
+    ) -> int:
+        async with sf() as session:
+            note = Note(
+                user_id=1,
+                chat_id=1,
+                is_group=False,
+                visibility="private",
+                source_type=source_type,
+                source_url=source_url,
+                raw_text=raw_text,
+                status="pending",
+            )
+            session.add(note)
+            await session.commit()
+            created_ids.append(note.id)
+            return note.id
+
     sf.insert_pending_text_note = insert_pending_text_note  # type: ignore[attr-defined]
+    sf.insert_pending_note = insert_pending_note  # type: ignore[attr-defined]
 
     yield sf
 
@@ -148,3 +170,113 @@ async def test_process_note_replaces_chunks_on_reprocessing(factory):
         )
         assert len(chunks) == 1
         assert "different second version" in chunks[0].chunk_text
+
+
+class FakeExtractor:
+    source_type = "page"
+    queue = "fast"
+
+    def __init__(self, *, text="", title=None, lang=None, error=None):
+        self._result = SimpleNamespace(
+            text=text, title=title, lang=lang, meta=({"error": error} if error else {})
+        )
+
+    async def extract(self, note):
+        return self._result
+
+
+async def test_process_note_indexes_extracted_text_for_a_page_note(factory):
+    note_id = await factory.insert_pending_note(
+        source_type="page", source_url="https://example.com/a", raw_text="https://example.com/a"
+    )
+    extractor = FakeExtractor(text="the extracted page content", lang="en")
+    client = FakeEmbeddingClient()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=client,
+        extractors={"page": extractor},
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "done"
+        assert note.extracted_text == "the extracted page content"
+        assert note.lang == "en"
+        chunks = (
+            (await session.execute(select(NoteChunk).where(NoteChunk.note_id == note_id)))
+            .scalars()
+            .all()
+        )
+        assert "extracted page content" in chunks[0].chunk_text
+
+
+async def test_process_note_degrades_to_raw_text_when_extraction_fails(factory):
+    """03-ingest.md, "Деградация": a blocked/failed extractor doesn't fail
+    the note — it indexes raw_text (the URL) instead, and still done."""
+    note_id = await factory.insert_pending_note(
+        source_type="page",
+        source_url="https://evil.example/",
+        raw_text="https://evil.example/",
+    )
+    extractor = FakeExtractor(text="", error="blocked address")
+    client = FakeEmbeddingClient()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=client,
+        extractors={"page": extractor},
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "done"
+        assert note.extracted_text is None
+        assert note.error == "blocked address"
+        chunks = (
+            (await session.execute(select(NoteChunk).where(NoteChunk.note_id == note_id)))
+            .scalars()
+            .all()
+        )
+        assert chunks[0].chunk_text == "https://evil.example/"
+
+
+async def test_process_note_fails_when_nothing_can_be_indexed_at_all(factory):
+    """Only when even raw_text is empty does degradation run out — the note
+    is physically unfindable, so this is the one case that is a real
+    failure."""
+    note_id = await factory.insert_pending_note(
+        source_type="page", source_url="https://evil.example/", raw_text=""
+    )
+    extractor = FakeExtractor(text="", error="blocked address")
+    client = FakeEmbeddingClient()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=client,
+        extractors={"page": extractor},
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "failed"
+
+
+async def test_process_note_raises_for_a_source_type_with_no_extractor_yet(factory):
+    note_id = await factory.insert_pending_note(
+        source_type="instagram", source_url="https://instagram.com/p/x", raw_text="caption"
+    )
+    client = FakeEmbeddingClient()
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=client, extractors={}
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        # Caught by process_note_async's generic except clause, same as any
+        # other extraction failure — not a crash of the worker process.
+        assert note.status == "failed"
