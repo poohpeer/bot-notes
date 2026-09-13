@@ -22,16 +22,28 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from redis import Redis
+from rq import Queue
+from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
+from notes_bot.clients.llm import LLMClient, LLMServiceError, NullLLMClient, ProxyAILLMClient
 from notes_bot.clients.telegram_files import TelegramFileClient
 from notes_bot.clients.transcribe import FasterWhisperClient
 from notes_bot.config import Settings, get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.db.models import Note
 from notes_bot.db.repositories import ChunkRepository, NoteRepository
+from notes_bot.db.search import search_notes
 from notes_bot.domain.chunking import chunk
+from notes_bot.enrich import (
+    find_duplicate,
+    generate_place,
+    generate_summary,
+    generate_tags,
+    generate_title,
+)
 from notes_bot.extractors.base import Extractor
 from notes_bot.extractors.instagram import InstagramExtractor
 from notes_bot.extractors.map import MapExtractor
@@ -44,6 +56,7 @@ log = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker | None = None
 _extractors: dict[str, Extractor] | None = None
+_llm_queue: Queue | None = None
 
 
 def _get_session_factory(settings: Settings) -> async_sessionmaker:
@@ -52,6 +65,13 @@ def _get_session_factory(settings: Settings) -> async_sessionmaker:
         _engine = create_engine(settings)
         _session_factory = create_session_factory(_engine)
     return _session_factory
+
+
+def _get_llm_queue(settings: Settings) -> Queue:
+    global _llm_queue
+    if _llm_queue is None:
+        _llm_queue = Queue("llm", connection=Redis.from_url(settings.redis_url))
+    return _llm_queue
 
 
 def _get_extractors(settings: Settings) -> dict[str, Extractor]:
@@ -115,6 +135,7 @@ async def process_note_async(
     session_factory: async_sessionmaker,
     embedding_client: HttpEmbeddingClient,
     extractors: dict[str, Extractor] | None = None,
+    llm_queue: Queue | None = None,
 ) -> None:
     # Empty, not a module-level default: a 'text' note never consults this
     # (see _extract_and_get_index_text), and every other source_type is
@@ -165,6 +186,13 @@ async def process_note_async(
             await session.commit()
             log.info("process_note: note_id=%s done, chunks=%d", note_id, len(new_chunks))
 
+            if llm_queue is not None:
+                # 03-ingest.md's sequence diagram: enrichment is queued
+                # right after status=done, never blocking it — a note is
+                # fully findable before enrich_note ever runs. Deterministic
+                # job_id (ADR-8), same as process_note's own enqueue.
+                llm_queue.enqueue(enrich_note, note_id, job_id=f"enrich_note:{note_id}")
+
         except EmbeddingServiceError as exc:
             await session.rollback()
             async with session_factory() as failure_session:
@@ -199,5 +227,143 @@ def process_note(note_id: int) -> None:
             session_factory=session_factory,
             embedding_client=embedding_client,
             extractors=_get_extractors(settings),
+            llm_queue=_get_llm_queue(settings),
+        )
+    )
+
+
+def _get_llm_client(settings: Settings) -> LLMClient:
+    """NullLLMClient when LLM_ENABLED=false — see 05-contracts.md. Built
+    fresh per call (unlike the cached engine/extractors) since it's cheap
+    and the flag could plausibly change between deploys without a code
+    change; no reason to bake the choice in at first import."""
+    if not settings.llm_enabled:
+        return NullLLMClient()
+    return ProxyAILLMClient(settings.proxy_ai_url)
+
+
+async def enrich_note_async(
+    note_id: int,
+    *,
+    session_factory: async_sessionmaker,
+    llm_client: LLMClient,
+    embedding_client: HttpEmbeddingClient,
+    llm_enabled: bool,
+    timeout_s: float,
+    dupe_candidate_k: int = 50,
+) -> None:
+    """Never touches status/extracted_text/chunks (see
+    NoteRepository.set_enrichment) — a note is already fully findable
+    before this ever runs; this only adds title/tags/summary/structured
+    fields and, for a `map` note, place details. See 03-ingest.md, "Шаг 6".
+    """
+    async with session_factory() as session:
+        note_repo = NoteRepository(session)
+        note = await note_repo.get(note_id)
+        if note is None or note.status != "done":
+            # Not indexed yet (still processing/failed) — nothing to
+            # enrich; re-enqueued once process_note actually finishes.
+            log.info("enrich_note: note_id=%s not done yet, skipping", note_id)
+            return
+
+        if not llm_enabled:
+            await note_repo.mark_enrich_skipped(note_id)
+            await session.commit()
+            return
+
+        await note_repo.mark_enrich_processing(note_id)
+        await session.commit()
+
+    async with session_factory() as session:
+        note_repo = NoteRepository(session)
+        chunk_repo = ChunkRepository(session)
+        note = await note_repo.get(note_id)
+        assert note is not None
+
+        text = note.extracted_text or note.raw_text or ""
+
+        try:
+            title = await generate_title(llm_client, text, timeout_s=timeout_s)
+            tags = await generate_tags(llm_client, text, timeout_s=timeout_s)
+            summary = await generate_summary(llm_client, text, timeout_s=timeout_s)
+
+            structured: dict = {}
+            if note.source_type == "map":
+                structured = await generate_place(llm_client, text, timeout_s=timeout_s)
+
+            own_embedding = await chunk_repo.get_first_chunk_embedding(note_id)
+            if own_embedding is not None:
+                hits = await search_notes(
+                    session,
+                    query_vector=own_embedding,
+                    acl_predicate=and_(Note.user_id == note.user_id, Note.id != note_id),
+                    active_model=embedding_client.model_name,
+                    candidate_k=dupe_candidate_k,
+                    limit=5,
+                    offset=0,
+                )
+                candidates = [(hit.note_id, hit.chunk_text) for hit in hits]
+                duplicate_id = await find_duplicate(
+                    llm_client, new_text=text, candidates=candidates, timeout_s=timeout_s
+                )
+                if duplicate_id is not None:
+                    # Surfacing this to the user needs the same worker->bot
+                    # notification channel noted as a gap in bot/handlers.py
+                    # — not built yet. Persisted here so it isn't lost.
+                    structured = {**structured, "possible_duplicate_of": duplicate_id}
+                    log.info(
+                        "enrich_note: note_id=%s possible duplicate of note_id=%s",
+                        note_id,
+                        duplicate_id,
+                    )
+
+            await note_repo.set_enrichment(
+                note_id, title=title, summary=summary, tags=tags, structured=structured
+            )
+            await session.commit()
+            log.info("enrich_note: note_id=%s done", note_id)
+
+        except LLMServiceError as exc:
+            await session.rollback()
+            async with session_factory() as failure_session:
+                await NoteRepository(failure_session).mark_enrich_failed(note_id, str(exc))
+                await failure_session.commit()
+            log.warning(
+                "enrich_note: note_id=%s failed (quota_exhausted=%s, retryable=%s): %s",
+                note_id,
+                exc.is_quota_exhausted,
+                exc.retryable,
+                exc,
+            )
+        except Exception as exc:  # noqa: BLE001 — logged and recorded, not swallowed
+            await session.rollback()
+            async with session_factory() as failure_session:
+                await NoteRepository(failure_session).mark_enrich_failed(note_id, str(exc))
+                await failure_session.commit()
+            log.exception("enrich_note: note_id=%s failed unexpectedly", note_id)
+
+
+def enrich_note(note_id: int) -> None:
+    """The RQ-registered entrypoint — `llm` queue, see 06-deployment.md.
+    Listened to by notes-worker-fast (after `fast`, per that doc: "fast и
+    llm в таком порядке — пользовательские задачи имеют приоритет над
+    обогащением"), not notes-worker-heavy — enrichment is cheap HTTP calls
+    to ai-proxy, not CPU-bound transcription.
+    """
+    settings = get_settings()
+    session_factory = _get_session_factory(settings)
+    embedding_client = HttpEmbeddingClient(
+        settings.embeddings_url,
+        model_name=settings.embedding_model_name,
+        dim=settings.embedding_dim,
+    )
+    asyncio.run(
+        enrich_note_async(
+            note_id,
+            session_factory=session_factory,
+            llm_client=_get_llm_client(settings),
+            embedding_client=embedding_client,
+            llm_enabled=settings.llm_enabled,
+            timeout_s=settings.llm_enrich_timeout_s,
         )
     )

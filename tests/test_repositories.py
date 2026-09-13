@@ -213,3 +213,87 @@ async def test_record_extraction_can_record_a_degraded_note(db_session):
     refreshed = await repo.get(note.id)
     assert refreshed.extracted_text is None
     assert refreshed.error == "blocked address"
+
+
+async def test_set_enrichment_writes_title_tags_summary_structured(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=200, raw_text="x", visibility="private"
+    )
+    await repo.set_enrichment(
+        note.id,
+        title="A Title",
+        summary="A summary",
+        tags=["food", "tbilisi"],
+        structured={"name": "Хинкальная"},
+    )
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.title == "A Title"
+    assert refreshed.summary == "A summary"
+    assert refreshed.tags == ["food", "tbilisi"]
+    assert refreshed.structured == {"name": "Хинкальная"}
+    assert refreshed.enrich_status == "done"
+
+
+async def test_set_enrichment_does_not_touch_status_or_extracted_text(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=201, raw_text="x", visibility="private"
+    )
+    await repo.mark_done(note.id)
+    await repo.set_enrichment(note.id, title="t", summary=None, tags=[], structured={})
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.status == "done"
+
+
+async def test_mark_enrich_failed_records_error(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=202, raw_text="x", visibility="private"
+    )
+    await repo.mark_enrich_failed(note.id, "quota exhausted")
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.enrich_status == "failed"
+    assert refreshed.error == "quota exhausted"
+
+
+async def test_mark_enrich_skipped(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=203, raw_text="x", visibility="private"
+    )
+    await repo.mark_enrich_skipped(note.id)
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.enrich_status == "skipped"
+
+
+async def test_get_first_chunk_embedding_returns_the_lowest_index_chunk(db_session):
+    repo = NoteRepository(db_session)
+    chunk_repo = ChunkRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=204, raw_text="x", visibility="private"
+    )
+    await chunk_repo.replace_chunks(
+        note.id,
+        [
+            NewChunk(text="first", token_count=1, embedding=_vec(0.1)),
+            NewChunk(text="second", token_count=1, embedding=_vec(0.2)),
+        ],
+        embedding_model="test-model",
+    )
+    await db_session.flush()
+    embedding = await chunk_repo.get_first_chunk_embedding(note.id)
+    assert embedding == pytest.approx(_vec(0.1))
+
+
+async def test_get_first_chunk_embedding_returns_none_without_chunks(db_session):
+    repo = NoteRepository(db_session)
+    chunk_repo = ChunkRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=205, raw_text="x", visibility="private"
+    )
+    assert await chunk_repo.get_first_chunk_embedding(note.id) is None

@@ -144,6 +144,47 @@ class NoteRepository:
             .values(status="failed", error=error, attempts=Note.attempts + 1)
         )
 
+    async def mark_enrich_processing(self, note_id: int) -> None:
+        await self._session.execute(
+            update(Note).where(Note.id == note_id).values(enrich_status="processing")
+        )
+
+    async def set_enrichment(
+        self,
+        note_id: int,
+        *,
+        title: str | None,
+        summary: str | None,
+        tags: list[str],
+        structured: dict,
+    ) -> None:
+        """Never touches `status`/`extracted_text`/chunks — enrichment is a
+        layer on top of an already-findable note (03-ingest.md, "Шаг 6"),
+        never a gate in front of it."""
+        await self._session.execute(
+            update(Note)
+            .where(Note.id == note_id)
+            .values(
+                title=title,
+                summary=summary,
+                tags=tags,
+                structured=structured,
+                enrich_status="done",
+            )
+        )
+
+    async def mark_enrich_failed(self, note_id: int, error: str) -> None:
+        await self._session.execute(
+            update(Note).where(Note.id == note_id).values(enrich_status="failed", error=error)
+        )
+
+    async def mark_enrich_skipped(self, note_id: int) -> None:
+        """LLM_ENABLED=false — see 05-contracts.md's NullLLMClient. Distinct
+        from 'failed': nothing went wrong, enrichment just isn't turned on."""
+        await self._session.execute(
+            update(Note).where(Note.id == note_id).values(enrich_status="skipped")
+        )
+
     async def toggle_visibility(self, note_id: int, user_id: int) -> str | None:
         """Flips private<->public. Ownership is enforced in the WHERE clause
         of the UPDATE itself — zero rows affected means "not yours or
@@ -165,6 +206,21 @@ class NoteRepository:
 class ChunkRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get_first_chunk_embedding(self, note_id: int) -> list[float] | None:
+        """Stands in for "this note's vector" in duplicate detection — one
+        chunk's embedding, not an average across all of them. Good enough
+        to find near-duplicate notes; a proper per-note centroid isn't
+        worth the complexity for a candidate search that an LLM call
+        confirms afterward anyway (03-ingest.md, "Шаг 6")."""
+        result = await self._session.execute(
+            select(NoteChunk.embedding)
+            .where(NoteChunk.note_id == note_id)
+            .order_by(NoteChunk.chunk_index)
+            .limit(1)
+        )
+        row = result.first()
+        return list(row[0]) if row else None
 
     async def replace_chunks(
         self, note_id: int, chunks: list[NewChunk], *, embedding_model: str
