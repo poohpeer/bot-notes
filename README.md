@@ -1,51 +1,51 @@
 # Notes Bot
 
-Telegram-бот для сохранения заметок (ссылки и свободный текст) с
-семантическим поиском через embeddings. Поддержка нескольких пользователей и
-общих «комнат» на базе Telegram-групп.
+A Telegram bot for saving notes (links and free-form text) with semantic
+search via embeddings. Supports multiple users and shared "rooms" based on
+Telegram groups.
 
-## Состояние
+## Status
 
-M0 (каркас) + M1 (embedding-сервис): конфигурация, модель данных, миграции,
-CI, сборка образов, `notes-embeddings` (`POST /embed`, `GET /model`).
-Выбор embedding-модели ещё не закрыт - нужен бенчмарк на реальных заметках,
-см. `services/embeddings/README.md`. Бот и воркеры пока ничего не делают -
-см. `docs/architecture/08-roadmap.md`.
+M0 (scaffold) + M1 (embedding service): configuration, data model,
+migrations, CI, image builds, `notes-embeddings` (`POST /embed`, `GET
+/model`). The embedding model choice is still open — needs a benchmark on
+real notes, see `services/embeddings/README.md`. The bot and workers don't
+do anything yet — see `docs/architecture/08-roadmap.md`.
 
-- [Дизайн-документ](docs/design/notes-bot-design.md) - исходные требования
-- [Архитектура](docs/architecture/README.md) - целевое устройство системы
-- [Этапы имплементации](docs/architecture/08-roadmap.md) - план работ M0-M9
+- [Design document](docs/design/notes-bot-design.md) — original requirements
+- [Architecture](docs/architecture/README.md) — target system design
+- [Implementation stages](docs/architecture/08-roadmap.md) — M0-M9 work plan
 
-## Стек
+## Stack
 
-Python, Postgres + pgvector, Redis + RQ, FastAPI + sentence-transformers для
-эмбеддингов, faster-whisper для транскрипции, Kubernetes.
+Python, Postgres + pgvector, Redis + RQ, FastAPI + sentence-transformers for
+embeddings, faster-whisper for transcription, Kubernetes.
 
-## Разработка
+## Development
 
 ```bash
-uv sync --extra heavy   # --extra heavy подтягивает yt-dlp/faster-whisper
+uv sync --extra heavy   # --extra heavy pulls in yt-dlp/faster-whisper
 uv run pytest -q
 uv run ruff check .
 uv run ruff format .
 ```
 
-Миграции (нужен `DATABASE_URL` с pgvector-инстансом, например
-`pgvector/pgvector:pg16` в Docker):
+Migrations (needs a `DATABASE_URL` pointing at a pgvector instance, e.g.
+`pgvector/pgvector:pg16` in Docker):
 
 ```bash
 uv run alembic upgrade head
-uv run alembic downgrade base   # откат до пустой базы, для проверки downgrade()
+uv run alembic downgrade base   # roll back to an empty database, to check downgrade()
 ```
 
-Обязательные переменные окружения (см. `notes_bot/config.py` и
+Required environment variables (see `notes_bot/config.py` and
 `docs/architecture/05-contracts.md`): `TELEGRAM_BOT_TOKEN`, `DATABASE_URL`,
-`REDIS_URL`, `EMBEDDINGS_URL`, `EMBEDDING_MODEL_NAME`. Остальные - опциональны,
-дефолты в `config.py`.
+`REDIS_URL`, `EMBEDDINGS_URL`, `EMBEDDING_MODEL_NAME`. The rest are optional,
+with defaults in `config.py`.
 
 ## Docker
 
-Один `Dockerfile`, два таргета - см. `docs/architecture/06-deployment.md`:
+One `Dockerfile`, two targets — see `docs/architecture/06-deployment.md`:
 
 ```bash
 docker build --target app -t notes-bot-app .
@@ -54,10 +54,11 @@ docker build --target app-heavy -t notes-bot-app-heavy .
 
 ## Kubernetes
 
-`deploy/k8s/` - ConfigMap и Job миграций (M0). Deployment-манифесты бота и
-воркеров появятся вместе с M2, когда эти процессы начнут что-то делать.
+`deploy/k8s/` — ConfigMap and the migration Job (M0). Deployment manifests
+for the bot and workers land with M2, once those processes actually do
+something.
 
 ```bash
-kubectl apply -f deploy/k8s/secret.yaml   # скопировать из secret.example.yaml, не коммитить
+kubectl apply -f deploy/k8s/secret.yaml   # copy from secret.example.yaml, never commit it
 kubectl apply -k deploy/k8s/
 ```
