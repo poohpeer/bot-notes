@@ -38,8 +38,18 @@ Dispatcher. Ни один этап не переписывает запрос (�
 ai-proxy или пустом ответе - просто ничего не приходит, `/search`-часть уже
 отработала.
 
-M8 (сборка мусора, импорт старых групп) и M9 (эксплуатация/observability) -
-следующие этапы, см. `docs/architecture/08-roadmap.md`.
+M8 (сборка мусора, импорт старых групп): `notes-gc` (ежедневный CronJob) -
+hard-delete заметок, удалённых больше `GC_RETENTION_DAYS` (30 дней по
+умолчанию) назад, и возврат зависших в `pending`/`processing` заметок
+(воркер упал/убит) обратно в очередь по детерминированному `job_id` - см.
+`notes_bot/cli/gc.py`. `tools/import_telegram_export.py` разбирает
+`result.json` из экспорта Telegram Desktop, классифицирует каждое
+сообщение так же, как живой `/save`, и идемпотентен по `structured.import_id`
+(`tg_message_id` у импортированных заметок всегда NULL - id из экспорта не
+совпадают с тем, что бот увидит вживую для того же чата).
+
+M9 (эксплуатация/observability) - следующий этап, см.
+`docs/architecture/08-roadmap.md`.
 
 Выбор embedding-модели ещё не закрыт - нужен бенчмарк на реальных заметках,
 см. `services/embeddings/README.md`.
@@ -99,8 +109,7 @@ docker build --target app-heavy -t notes-bot-app-heavy .
 ## Kubernetes
 
 `deploy/k8s/` - ConfigMap, Job миграций, `notes-embeddings`, `notes-bot`,
-`notes-worker-fast`, `notes-worker-heavy`. `notes-gc` (CronJob) - M8, когда
-появится soft-delete.
+`notes-worker-fast`, `notes-worker-heavy`, `notes-gc` (CronJob, `0 3 * * *`).
 
 ```bash
 kubectl apply -f deploy/k8s/secret.yaml   # скопировать из secret.example.yaml, не коммитить

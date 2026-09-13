@@ -8,6 +8,4 @@ resources:
   - embeddings.yaml
   - app.yaml
   - worker-heavy.yaml
-
-# notes-gc (CronJob) is M8 — nothing to garbage-collect meaningfully before
-# soft-delete (M6) exists. See docs/architecture/08-roadmap.md.
+  - gc.yaml

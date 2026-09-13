@@ -194,7 +194,7 @@ async def process_note_async(
                 # right after status=done, never blocking it — a note is
                 # fully findable before enrich_note ever runs. Deterministic
                 # job_id (ADR-8), same as process_note's own enqueue.
-                llm_queue.enqueue(enrich_note, note_id, job_id=f"enrich_note:{note_id}")
+                llm_queue.enqueue(enrich_note, note_id, job_id=f"enrich_note-{note_id}")
 
         except EmbeddingServiceError as exc:
             await session.rollback()
