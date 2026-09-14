@@ -165,7 +165,294 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # No deploy job yet: M0 ships a migration Job and a ConfigMap, not a
-  # running bot. A deploy job mirroring bot-organizer's (self-hosted runner,
-  # rollout wait, log-based verification) lands with M2, once notes-bot and
-  # notes-worker-fast are real Deployments with something to verify.
+  deploy:
+    # Behind both build jobs, through build and build-embeddings. Mirrors
+    # bot-organizer's deploy job (same self-hosted runner, "Living Room Media
+    # PC" — registered separately for this repo under
+    # C:\Users\User\actions-runner-bot-notes, see its own README for how that
+    # was set up), adapted for three image families instead of one.
+    needs: [build, build-embeddings]
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.build.result == 'success' && needs.build-embeddings.result == 'success' }}
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Preflight
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          if (-not (Get-Command kubectl -ErrorAction SilentlyContinue)) {
+            throw "kubectl is not on the runner service PATH."
+          }
+          kubectl version --client
+          Write-Host "--- cluster ---"
+          kubectl cluster-info
+          if ($LASTEXITCODE -ne 0) { throw "No reachable cluster for the runner user." }
+          Write-Host "--- our resources ---"
+          kubectl get deployment notes-bot notes-worker-fast notes-worker-heavy notes-embeddings notes-bot-redis
+          kubectl get secret notes-bot-secrets notes-bot-ghcr-pull-secret
+          Write-Host "--- verdict ---"
+          kubectl get deployment notes-bot | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Deployments do not exist yet. Run 'kubectl apply -k deploy/k8s/' once, per deploy/k8s/README.md."
+          }
+          Write-Host "ok"
+
+      # v<run number> is what actually gets deployed, same convention as
+      # bot-organizer — unique, ordered, and crictl reports no creation time
+      # so an ordered tag is the only way the node-pruning step below can
+      # tell old from new. :latest stays in the manifests in git for anyone
+      # reading or applying them by hand.
+      - name: Pin the manifests to this build
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runNum = "${{ github.run_number }}"
+
+          function Pin-Image($path, $image) {
+            $before = Get-Content $path -Raw
+            $after = $before -replace [regex]::Escape("${image}:latest"), "${image}:v$runNum"
+            if ($after -eq $before) { throw "found no ${image}:latest to pin in $path" }
+            Set-Content -Path $path -Value $after -NoNewline
+            Write-Host "pinned $image in $path"
+          }
+
+          $app = "ghcr.io/poohpeer/bot-notes-app"
+          $appHeavy = "ghcr.io/poohpeer/bot-notes-app-heavy"
+          $embeddings = "ghcr.io/poohpeer/bot-notes-embeddings"
+
+          Pin-Image "deploy/k8s/app.yaml" $app
+          Pin-Image "deploy/k8s/migrate-job.yaml" $app
+          Pin-Image "deploy/k8s/gc.yaml" $app
+          Pin-Image "deploy/k8s/worker-heavy.yaml" $appHeavy
+          Pin-Image "deploy/k8s/embeddings.yaml" $embeddings
+
+      # A Job's spec is immutable once created (deploy/k8s/migrate-job.yaml's
+      # own docstring) — re-applying a pinned image on top of a Job that
+      # already ran (and normally still sits there Completed) fails outright,
+      # not just no-ops.
+      - name: Delete the previous migration Job
+        shell: powershell
+        run: |
+          kubectl delete job notes-bot-migrate --ignore-not-found
+          if ($LASTEXITCODE -ne 0) { throw "kubectl delete job failed" }
+
+      - name: Apply manifests
+        shell: powershell
+        run: |
+          kubectl apply -k deploy/k8s/
+          if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
+
+      - name: Wait for migration
+        shell: powershell
+        run: |
+          kubectl wait --for=condition=complete job/notes-bot-migrate --timeout=180s
+          if ($LASTEXITCODE -ne 0) {
+            kubectl logs job/notes-bot-migrate --tail=100
+            throw "migration did not complete"
+          }
+
+      - name: Wait for rollout
+        shell: powershell
+        run: |
+          kubectl rollout status deployment/notes-embeddings --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "notes-embeddings rollout did not complete" }
+          kubectl rollout status deployment/notes-bot --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "notes-bot rollout did not complete" }
+          kubectl rollout status deployment/notes-worker-fast --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "notes-worker-fast rollout did not complete" }
+          kubectl rollout status deployment/notes-worker-heavy --timeout=180s
+          if ($LASTEXITCODE -ne 0) { throw "notes-worker-heavy rollout did not complete" }
+
+      # A completed rollout only means the pod started, not that it is
+      # actually doing its job — notes-bot has no readiness gate on a real
+      # Telegram round trip beyond /readyz, so the startup log lines are the
+      # real proof, same reasoning as bot-organizer's equivalent step.
+      - name: Verify the stack is actually running
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds 10
+
+          $botLog = kubectl logs deployment/notes-bot --tail=100 2>&1 | Out-String
+          $fastLog = kubectl logs deployment/notes-worker-fast --tail=50 2>&1 | Out-String
+          $heavyLog = kubectl logs deployment/notes-worker-heavy --tail=50 2>&1 | Out-String
+          $embLog = kubectl logs deployment/notes-embeddings --tail=50 2>&1 | Out-String
+
+          Write-Host "--- notes-bot ---"
+          Write-Host $botLog
+          Write-Host "--- notes-worker-fast ---"
+          Write-Host $fastLog
+          Write-Host "--- notes-worker-heavy ---"
+          Write-Host $heavyLog
+          Write-Host "--- notes-embeddings ---"
+          Write-Host $embLog
+
+          if ($botLog -notmatch 'notes-bot starting up as @') {
+            throw "the bot never reached Telegram: no 'notes-bot starting up as @' line."
+          }
+          if ($fastLog -notmatch 'notes-worker starting') {
+            throw "notes-worker-fast never started its poll loop."
+          }
+          if ($heavyLog -notmatch 'notes-worker starting') {
+            throw "notes-worker-heavy never started its poll loop."
+          }
+          if ($embLog -notmatch 'model ready') {
+            throw "notes-embeddings never finished loading the model."
+          }
+          Write-Host "all four processes are up"
+
+          Write-Host "--- running images ---"
+          kubectl get deployment notes-bot -o "jsonpath={.spec.template.spec.containers[0].image}"
+          Write-Host ""
+          kubectl get deployment notes-worker-heavy -o "jsonpath={.spec.template.spec.containers[0].image}"
+          Write-Host ""
+          kubectl get deployment notes-embeddings -o "jsonpath={.spec.template.spec.containers[0].image}"
+          Write-Host ""
+
+      # Housekeeping, never a reason to fail a deploy that worked — hence
+      # continue-on-error. The node keeps every image it has ever pulled, and
+      # nothing else ever removes one. Three per repo: the version running,
+      # the one to roll back to, and one more — matching bot-organizer, run
+      # once per image family since this repo has three instead of one.
+      - name: Keep only the last three versions per image on the node
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Continue'
+          try {
+            $node = kubectl get nodes -o "jsonpath={.items[0].metadata.name}"
+            if (-not $node) { throw "could not read the node name" }
+
+            $repos = @(
+              "ghcr.io/poohpeer/bot-notes-app",
+              "ghcr.io/poohpeer/bot-notes-app-heavy",
+              "ghcr.io/poohpeer/bot-notes-embeddings"
+            )
+
+            $images = docker exec $node crictl images -o json | ConvertFrom-Json
+
+            foreach ($repo in $repos) {
+              $versions = @()
+              foreach ($img in $images.images) {
+                foreach ($tag in $img.repoTags) {
+                  if ($tag -match "^$([regex]::Escape($repo)):v(\d+)$") {
+                    $versions += [pscustomobject]@{ Tag = $tag; Number = [int]$Matches[1] }
+                  }
+                }
+              }
+
+              $stale = $versions | Sort-Object Number -Descending | Select-Object -Skip 3
+              if (-not $stale) {
+                Write-Host "$repo`: no stale tags ($($versions.Count) version(s) on the node)"
+              }
+              foreach ($old in $stale) {
+                Write-Host "removing $($old.Tag)"
+                docker exec $node crictl rmi $old.Tag
+              }
+
+              # Same reasoning as bot-organizer: an image whose :vN tag is
+              # already gone (from a previous prune, or a build whose push
+              # only partially landed) is invisible to the loop above, which
+              # matches on that tag, and would otherwise pile up forever.
+              $untagged = $images.images | Where-Object {
+                -not $_.repoTags -and ($_.repoDigests | Where-Object { $_ -like "$repo@*" })
+              }
+              Write-Host "$repo`: $($untagged.Count) untagged image(s) to remove"
+              foreach ($img in $untagged) {
+                docker exec $node crictl rmi $img.id
+              }
+            }
+          } catch {
+            Write-Warning "Could not prune old images: $_"
+          }
+
+  # Only after the cluster is confirmed running the new images — deleting a
+  # version someone might have to roll back to, before knowing the new one
+  # works, is the one way this job could do real damage.
+  prune-registry:
+    needs: deploy
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        package: [bot-notes-app, bot-notes-app-heavy, bot-notes-embeddings]
+    steps:
+      # Same script as bot-organizer's, parameterized by package — this repo
+      # has three GHCR packages instead of one, and each needs its own
+      # keep-last-three cutoff computed from its own version history.
+      - name: Keep only the last three versions in GHCR
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_CLEANUP_TOKEN || secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ matrix.package }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -uo pipefail
+
+          owner_type=$(gh api "/users/$OWNER" --jq .type 2>/dev/null || echo User)
+          if [ "$owner_type" = "Organization" ]; then
+            base="/orgs/$OWNER/packages/container/$PACKAGE"
+          else
+            base="/users/$OWNER/packages/container/$PACKAGE"
+          fi
+          echo "owner is a $owner_type; using $base"
+
+          versions=$(gh api --paginate "$base/versions?per_page=100" 2>/dev/null | jq -s 'add') || {
+            echo "Could not list versions — see the note on GHCR_CLEANUP_TOKEN below."
+            exit 0
+          }
+          if [ -z "$versions" ] || [ "$versions" = "null" ]; then
+            echo "Could not list versions — see the note on GHCR_CLEANUP_TOKEN below."
+            exit 0
+          fi
+          echo "$(printf '%s' "$versions" | jq 'length') version(s) in the registry"
+
+          # Same reasoning as bot-organizer: a build pushes one image index
+          # plus a buildx provenance attestation, which GHCR lists as its own
+          # untagged version — so "three versions" means three builds' worth
+          # of timestamp, not three list entries.
+          cutoff=$(printf '%s' "$versions" | jq -r '
+            [ .[]
+              | select(any(.metadata.container.tags[]?; test("^v[0-9]+$")))
+              | { n: ([ .metadata.container.tags[] | select(test("^v[0-9]+$")) | ltrimstr("v") | tonumber ] | max),
+                  at: .created_at }
+            ]
+            | sort_by(.n) | reverse | .[0:3] | map(.at) | min // empty
+          ')
+          if [ -z "$cutoff" ]; then
+            echo "no v<N>-tagged versions found; refusing to delete anything"
+            exit 0
+          fi
+          cutoff=$(date -u -d "$cutoff - 1 minute" +%Y-%m-%dT%H:%M:%SZ)
+          echo "keeping everything created at or after $cutoff"
+
+          stale=$(printf '%s' "$versions" | jq -r --arg cutoff "$cutoff" '
+            .[] | select(.created_at < $cutoff)
+            | "\(.id)\t\(.created_at)\t\((.metadata.container.tags // []) | join(",") | if . == "" then "<untagged>" else . end)"
+          ')
+          if [ -z "$stale" ]; then
+            echo "nothing to remove"
+            exit 0
+          fi
+
+          echo "$stale" | wc -l | xargs echo "removing" "version(s):"
+          failed=0
+          while IFS=$'\t' read -r id created tags; do
+            [ -z "$id" ] && continue
+            if gh api -X DELETE "$base/versions/$id" >/dev/null 2>&1; then
+              echo "  deleted $id  $created  $tags"
+            else
+              failed=$((failed + 1))
+              echo "  FAILED  $id  $created  $tags"
+            fi
+          done <<< "$stale"
+
+          if [ "$failed" -gt 0 ]; then
+            echo
+            echo "$failed deletion(s) refused. GITHUB_TOKEN can only delete versions of a"
+            echo "package owned by an organisation. For a user-owned package, add a"
+            echo "personal access token with the delete:packages scope as the repository"
+            echo "secret GHCR_CLEANUP_TOKEN; this step picks it up automatically."
+          fi

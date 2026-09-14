@@ -21,6 +21,17 @@ spec:
       containers:
         - name: embeddings
           image: ghcr.io/poohpeer/bot-notes-embeddings:latest
+          # PyTorch sizes its thread pool from the *host's* CPU count, blind
+          # to the cgroup limit below — on a shared node that means far more
+          # threads than the container can actually run at once, causing
+          # scheduling thrash that pushes single-request inference past
+          # EMBEDDINGS_QUEUE_TIMEOUT_S (429 "at capacity") even with no real
+          # concurrent load. Pin the thread pool to the CPU limit instead.
+          env:
+            - name: OMP_NUM_THREADS
+              value: "2"
+            - name: MKL_NUM_THREADS
+              value: "2"
           ports:
             - containerPort: 8000
           resources:
