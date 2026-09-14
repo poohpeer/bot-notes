@@ -7,14 +7,24 @@ Telegram groups.
 ## Status
 
 M0 (scaffold) + M1 (embedding service) + M2 (text notes and search) + M3
-(links) + M4 (transcription): you can send the bot text, a link (a regular
-page, YouTube, a short maps link), or a voice message in a private chat,
-toggle privacy with a button, find a note with `/search`. Voice notes and
-Instagram posts are transcribed via `faster-whisper` on a separate heavy
-worker (`notes-worker-heavy`), without blocking a plain text save. A failed
-extraction doesn't fail the note — the raw text is indexed instead
-(degradation, see `03-ingest.md`). LLM enrichment and groups are the next
-stages — see `docs/architecture/08-roadmap.md`.
+(links) + M4 (transcription) + M5 (LLM enrichment): you can send the bot
+text, a link (a regular page, YouTube, a short maps link), or a voice
+message in a private chat, toggle privacy with a button, find a note with
+`/search`. Voice notes and Instagram posts are transcribed via
+`faster-whisper` on a separate heavy worker (`notes-worker-heavy`), without
+blocking a plain text save. A failed extraction doesn't fail the note — the
+raw text is indexed instead (degradation, see `03-ingest.md`).
+
+After saving, a note is asynchronously enriched via ai-proxy (title, tags,
+summary, structured place fields for maps, duplicate detection) — but
+`LLM_ENABLED=false` by default and **must stay `false` in production** until
+the codex sandbox fix in `poohpeer/ai-proxy` ships (ADR-14, risk R5 in
+`07-decisions.md`; the fix is `ai-proxy#15`, not merged). Without it,
+everything works without titles and tags — `NullLLMClient` is substituted
+automatically.
+
+Groups and `/smart_search` are the next stages — see
+`docs/architecture/08-roadmap.md`.
 
 The embedding model choice is still open — needs a benchmark on real notes,
 see `services/embeddings/README.md`.
