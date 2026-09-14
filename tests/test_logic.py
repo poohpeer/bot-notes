@@ -20,6 +20,7 @@ from notes_bot.bot.logic import (
     save_voice_note,
     set_group_capture_mode,
     show_more,
+    smart_search,
     toggle_privacy,
 )
 from notes_bot.clients.search_cache import SearchSessionCache
@@ -104,6 +105,7 @@ def deps(db_engine, redis_client):
         search_cache=SearchSessionCache(redis_client),
         fast_queue=FakeQueue(),
         heavy_queue=FakeQueue(),
+        llm_queue=FakeQueue(),
         settings=_settings(),
     )
 
@@ -273,6 +275,33 @@ async def test_set_group_capture_mode_persists(deps, db_engine):
     sf = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     async with sf() as session:
         assert await ChatSettingsRepository(session).get_capture_mode(777) == "all"
+
+
+async def test_smart_search_returns_the_same_page_as_run_search(deps, db_engine):
+    """Default `deps` fixture has LLM_ENABLED=false (Settings' own
+    default), so this also covers "no enqueue when disabled"."""
+    await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+
+    page = await smart_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
+    assert len(page.hits) == 1
+    assert deps.llm_queue.calls == []
+
+
+async def test_smart_search_enqueues_smart_answer_when_llm_enabled(db_engine, redis_client):
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    enabled_deps = Deps(
+        session_factory=session_factory,
+        embedding_client=FakeEmbeddingClient(),
+        search_cache=SearchSessionCache(redis_client),
+        fast_queue=FakeQueue(),
+        heavy_queue=FakeQueue(),
+        llm_queue=FakeQueue(),
+        settings=_settings(LLM_ENABLED=True),
+    )
+    await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+
+    await smart_search(enabled_deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
+    assert len(enabled_deps.llm_queue.calls) == 1
 
 
 async def test_save_note_classifies_a_page_url_and_enqueues_it(deps):

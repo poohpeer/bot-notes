@@ -29,13 +29,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
 from notes_bot.clients.llm import LLMClient, LLMServiceError, NullLLMClient, ProxyAILLMClient
+from notes_bot.clients.prompts import load_prompt
 from notes_bot.clients.telegram_files import TelegramFileClient
+from notes_bot.clients.telegram_sender import Sender, TelegramSender
 from notes_bot.clients.transcribe import FasterWhisperClient
 from notes_bot.config import Settings, get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.db.models import Note
-from notes_bot.db.repositories import ChunkRepository, NoteRepository
+from notes_bot.db.repositories import ChunkRepository, NoteRepository, UserSettingsRepository
 from notes_bot.db.search import search_notes
+from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.chunking import chunk
 from notes_bot.enrich import (
     find_duplicate,
@@ -365,5 +368,119 @@ def enrich_note(note_id: int) -> None:
             embedding_client=embedding_client,
             llm_enabled=settings.llm_enabled,
             timeout_s=settings.llm_enrich_timeout_s,
+        )
+    )
+
+
+async def smart_answer_async(
+    *,
+    user_id: int,
+    chat_id: int,
+    is_group_chat: bool,
+    query_text: str,
+    session_factory: async_sessionmaker,
+    embedding_client: HttpEmbeddingClient,
+    llm_client: LLMClient,
+    llm_enabled: bool,
+    timeout_s: float,
+    sender: Sender,
+    top_n: int = 10,
+) -> None:
+    """`smart_answer` — see 04-search.md, "/smart_search": the synthesis
+    half of an already-shown search. Never surfaces an error to the user —
+    "при ошибке ai-proxy умный ответ просто не приходит, обычная выдача уже
+    показана" — this function's only failure mode is "return without
+    sending anything", logged, not raised.
+
+    ACL is enforced here, in the SQL that builds `hits`, before any note
+    text reaches the LLM prompt — see 04-search.md: "единственный способ,
+    которым приватная заметка может покинуть систему, - попадание в
+    контекст LLM-запроса".
+    """
+    if not llm_enabled:
+        log.info("smart_answer: user_id=%s LLM disabled, skipping", user_id)
+        return
+
+    async with session_factory() as session:
+        search_mode = "all"
+        if not is_group_chat:
+            settings_row = await UserSettingsRepository(session).get_or_create(user_id)
+            search_mode = settings_row.search_mode
+
+        try:
+            query_vector = await embedding_client.embed_query(query_text)
+        except EmbeddingServiceError as exc:
+            log.warning("smart_answer: user_id=%s embedding failed: %s", user_id, exc)
+            return
+
+        predicate = visibility_predicate(
+            user_id=user_id, chat_id=chat_id, is_group_chat=is_group_chat, search_mode=search_mode
+        )
+        hits = await search_notes(
+            session,
+            query_vector=query_vector,
+            acl_predicate=predicate,
+            active_model=embedding_client.model_name,
+            candidate_k=200,
+            limit=top_n,
+            offset=0,
+        )
+
+    if not hits:
+        log.info("smart_answer: user_id=%s no matching notes, skipping", user_id)
+        return
+
+    context_block = "\n\n".join(
+        f"[{h.note_id}] {h.title or ''}\n{h.chunk_text}".strip() for h in hits
+    )
+    user_prompt = f"Вопрос: {query_text}\n\nЗаметки:\n{context_block}"
+
+    try:
+        result = await llm_client.complete(
+            system=load_prompt("rag_answer"), user=user_prompt, timeout_s=timeout_s
+        )
+    except LLMServiceError as exc:
+        log.warning(
+            "smart_answer: user_id=%s ai-proxy failed (quota_exhausted=%s): %s",
+            user_id,
+            exc.is_quota_exhausted,
+            exc,
+        )
+        return
+
+    if not result.text:
+        log.info("smart_answer: user_id=%s empty synthesis, skipping", user_id)
+        return
+
+    sources = "\n".join(
+        f"[{h.note_id}] {h.title or h.chunk_text[:40]}"
+        + (f" — {h.source_url}" if h.source_url else "")
+        for h in hits
+    )
+    answer = f"{result.text}\n\nИсточники:\n{sources}"
+    await sender.send(chat_id, answer)
+
+
+def smart_answer(user_id: int, chat_id: int, is_group_chat: bool, query_text: str) -> None:
+    """The RQ-registered entrypoint — `llm` queue, see 06-deployment.md."""
+    settings = get_settings()
+    session_factory = _get_session_factory(settings)
+    embedding_client = HttpEmbeddingClient(
+        settings.embeddings_url,
+        model_name=settings.embedding_model_name,
+        dim=settings.embedding_dim,
+    )
+    asyncio.run(
+        smart_answer_async(
+            user_id=user_id,
+            chat_id=chat_id,
+            is_group_chat=is_group_chat,
+            query_text=query_text,
+            session_factory=session_factory,
+            embedding_client=embedding_client,
+            llm_client=_get_llm_client(settings),
+            llm_enabled=settings.llm_enabled,
+            timeout_s=settings.llm_smart_search_timeout_s,
+            sender=TelegramSender(settings.telegram_bot_token),
         )
     )

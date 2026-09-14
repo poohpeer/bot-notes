@@ -30,7 +30,18 @@ group. `/list` and `/trash` (private chat only — private notes are never
 broadcast into a group), delete with confirmation, restore. Editing a text
 note works through a regular Telegram message edit.
 
-`/smart_search` is the next stage — see `docs/architecture/08-roadmap.md`.
+M7 (`/smart_search`): the same results as `/search` (never worse), but
+followed by a synthesized, source-linked answer via ai-proxy
+(`rag_answer.md`) computed on the `llm` queue and delivered as a separate
+message — the worker sends it directly via the Bot API (`TelegramSender`),
+without a shared Dispatcher. No step rewrites the query (see
+`04-search.md`). Degradation: with no matches, no LLM (`LLM_ENABLED=false`),
+an ai-proxy error, or an empty response — nothing arrives, and the
+`/search` part has already run.
+
+M8 (garbage collection, importing old groups) and M9
+(operations/observability) are the next stages — see
+`docs/architecture/08-roadmap.md`.
 
 The embedding model choice is still open — needs a benchmark on real notes,
 see `services/embeddings/README.md`.

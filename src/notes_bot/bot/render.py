@@ -78,6 +78,14 @@ def render_group_note_saved() -> str:
     return "Сохранил в заметки комнаты."
 
 
+def render_smart_answer_pending() -> str:
+    """04-search.md's mermaid: shown right after the ordinary results, in
+    place of a synchronous typing indicator — the synthesis itself runs on
+    a worker and may take minutes, so there's nothing to keep "typing" for
+    from the bot process."""
+    return "🧠 Готовлю умный ответ по вашим заметкам…"
+
+
 def render_group_welcome() -> str:
     return (
         "Привет! Я сохраняю заметки с поиском по смыслу. В этой группе я "
