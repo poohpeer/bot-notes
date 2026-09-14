@@ -290,6 +290,53 @@ async def test_a_note_below_the_cap_is_reclaimed_not_abandoned(factory, rq_queue
         assert note.attempts == 3
 
 
+class BrokenQueue:
+    """Stands in for a Queue whose Redis connection is down — observed live:
+    a `redis.exceptions.TimeoutError` from `enqueue()` used to abort the
+    whole batch, silently, since nothing after it ever got a chance to run."""
+
+    def __init__(self) -> None:
+        self.job_ids: list[str] = []
+
+    def enqueue(self, *a, **kw):
+        raise ConnectionError("simulated Redis outage")
+
+
+async def test_an_enqueue_failure_does_not_take_the_rest_of_the_batch_down(factory, rq_queues):
+    fast_queue, _ = rq_queues
+    broken_id = await _make_note(factory, status="processing", source_type="voice")
+    healthy_id = await _make_note(factory, status="processing", source_type="text")
+    stuck_cutoff = datetime.now(UTC) - timedelta(minutes=60)
+    await _backdate(factory, broken_id, column="updated_at", when=stuck_cutoff)
+    await _backdate(factory, healthy_id, column="updated_at", when=stuck_cutoff)
+
+    alerts = FakeAlerts()
+    reclaimed, abandoned = await reclaim_stuck(
+        factory,
+        fast_queue,
+        BrokenQueue(),  # the heavy queue, for the voice note
+        alerts,
+        stuck_minutes=30,
+        max_attempts=3,
+        heavy_job_timeout_s=900,
+        batch_size=500,
+    )
+    assert (reclaimed, abandoned) == (2, 0)
+
+    async with factory() as session:
+        broken = await session.get(Note, broken_id)
+        healthy = await session.get(Note, healthy_id)
+        # Both were reclaimed in the database — that decision predates the
+        # enqueue attempt and cannot be rolled back by its failure — but
+        # only the healthy one actually reached the queue.
+        assert broken.status == "pending"
+        assert healthy.status == "pending"
+    assert fast_queue.job_ids == [f"process_note-{healthy_id}"]
+    assert {c["note_id"] for c in alerts.reclaimed_calls} == {healthy_id}, (
+        "no alert for the one that was never actually re-enqueued"
+    )
+
+
 async def test_run_async_job_reclaim_skips_hard_delete(factory, rq_queues):
     """--job reclaim must not also hard-delete — the two run on independent
     schedules precisely so the frequent one stays cheap."""
