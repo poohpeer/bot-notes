@@ -1,8 +1,10 @@
 """aiogram handlers — thin adapters over bot/logic.py. Parses/formats
 Telegram objects and delegates every decision to the pure logic layer.
 
-M2 scope only: text notes in private chats, /search + /search_mine +
-/search_all. Group capture (ADR-10) is M6; other source types are M3/M4.
+Private chats only: text, page, YouTube, and map links, classified by
+domain.classify (M3), /search + /search_mine + /search_all (M2). Voice
+messages and Instagram links aren't wired in yet (M4); group capture
+(ADR-10) is M6.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from notes_bot.bot.keyboards import privacy_keyboard, search_more_keyboard
-from notes_bot.bot.logic import Deps, run_search, save_text_note, show_more, toggle_privacy
+from notes_bot.bot.logic import Deps, run_search, save_note, show_more, toggle_privacy
 from notes_bot.bot.render import (
     render_no_more_results,
     render_note_saved,
@@ -110,8 +112,10 @@ async def on_toggle_privacy(callback: CallbackQuery, deps: Deps) -> None:
 
 
 @router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
-async def on_text_note(message: Message, deps: Deps) -> None:
-    result = await save_text_note(
+async def on_note_message(message: Message, deps: Deps) -> None:
+    """Any non-command text — save_note classifies it (plain text vs a
+    page/YouTube/map/Instagram link) and routes accordingly."""
+    result = await save_note(
         deps,
         user_id=message.from_user.id,
         chat_id=message.chat.id,

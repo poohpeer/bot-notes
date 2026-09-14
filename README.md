@@ -6,10 +6,13 @@ Telegram groups.
 
 ## Status
 
-M0 (scaffold) + M1 (embedding service) + M2 (text notes and search — a
-minimal useful system): you can send the bot text in a private chat, toggle
-privacy with a button, find a note with `/search`, switch mode with
-`/search_mine` / `/search_all`. Links, transcription, LLM enrichment and
+M0 (scaffold) + M1 (embedding service) + M2 (text notes and search) + M3
+(links): you can send the bot text or a link (a regular page, YouTube, a
+short maps link) in a private chat, toggle privacy with a button, find a
+note with `/search`. A regular link is indexed via `trafilatura`, YouTube via
+title/description/subtitles, a map link via the place name from the final
+URL; a failed extraction doesn't fail the note — the raw text is indexed
+instead (degradation, see `03-ingest.md`). Transcription, LLM enrichment and
 groups are the next stages — see `docs/architecture/08-roadmap.md`.
 
 The embedding model choice is still open — needs a benchmark on real notes,

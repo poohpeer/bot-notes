@@ -1,5 +1,6 @@
 """Splits note text into overlapping chunks for embedding — see
-docs/architecture/02-data-model.md and 05-contracts.md's `chunk` interface.
+docs/architecture/02-data-model.md, 03-ingest.md ("Шаг 4. Чанкинг"), and
+05-contracts.md's `chunk` interface.
 
 Pure function: no I/O, no model, no session — testable without
 infrastructure, per docs/architecture/01-context.md.
@@ -39,16 +40,41 @@ class Chunk:
     token_count: int
 
 
+def normalize(text: str) -> str:
+    """Step 1 of "Шаг 4. Чанкинг": collapse whitespace and drop a line that
+    exactly repeats the one before it — typical of YouTube auto-subtitles,
+    which re-emit the previous line as new words scroll in. Harmless no-op
+    on plain note text, which rarely repeats a whole line back to back.
+
+    Subtitle *timecodes* ("00:00:01,000 --> 00:00:04,000") are stripped by
+    the extractor that parses that format (M4), not here — this function
+    only sees text that could plausibly come from any source.
+    """
+    deduped: list[str] = []
+    previous: str | None = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped == previous:
+            continue
+        deduped.append(stripped)
+        previous = stripped
+    return " ".join(deduped)
+
+
 def chunk(
     text: str,
     *,
     tokenizer: Tokenizer | None = None,
-    target: int = 200,
-    overlap: int = 40,
-    min_size: int = 20,
-    max_chunks: int = 50,
+    target: int = 400,
+    overlap: int = 60,
+    min_size: int = 40,
+    max_chunks: int = 200,
 ) -> list[Chunk]:
     """Split `text` into overlapping word-windows sized by `tokenizer`.
+
+    Defaults are the values fixed in 03-ingest.md, "Шаг 4": 400 target / 60
+    overlap / 40 min / 200 max — chosen there to fit both candidate models'
+    context and survive an hour-long transcript without unbounded chunks.
 
     - `target`: desired token count per chunk.
     - `overlap`: tokens repeated at the start of the next chunk, so a
@@ -60,7 +86,7 @@ def chunk(
       unbounded number of chunks (and embedding calls) in a single job.
     """
     tokenizer = tokenizer or WhitespaceTokenizer()
-    words = text.split()
+    words = normalize(text).split()
     if not words:
         return []
 

@@ -17,7 +17,14 @@ from notes_bot.config import Settings
 from notes_bot.db.repositories import NoteRepository, UserSettingsRepository
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
+from notes_bot.domain.classify import classify_text_message
 from notes_bot.queue.queues import enqueue_process_note
+
+# instagram and voice go to `heavy` (M4) — see 03-ingest.md, "Шаг 2. Приём
+# в боте": "Выбрать очередь: instagram и voice → heavy, всё остальное →
+# fast". Voice messages aren't classified here at all (that's a Telegram
+# message *type*, decided before this runs, and isn't wired in until M4).
+_HEAVY_SOURCE_TYPES = {"instagram", "voice"}
 
 
 @dataclass(frozen=True)
@@ -30,29 +37,41 @@ class Deps:
 
 
 @dataclass(frozen=True)
-class SaveTextNoteResult:
+class SaveNoteResult:
     created: bool
     note_id: int | None
     visibility: str | None
+    source_type: str | None = None
 
 
-async def save_text_note(
+async def save_note(
     deps: Deps, *, user_id: int, chat_id: int, is_group: bool, tg_message_id: int, text: str
-) -> SaveTextNoteResult:
+) -> SaveNoteResult:
     """Fail-closed privacy (ADR-5): a private-chat note is saved with the
     user's default visibility immediately, before any button is pressed. A
-    group note gets no visibility at all — group membership is its scope."""
+    group note gets no visibility at all — group membership is its scope.
+
+    Source type is classified from the message text (03-ingest.md, "Шаг 1")
+    — a URL routes to page/youtube/map/instagram, plain text stays 'text'.
+    An instagram link is accepted and saved like any other note, but has no
+    extractor wired in yet (M4) — it settles as `status='failed'`, same as
+    any other extraction failure, rather than being refused up front.
+    """
+    classification = classify_text_message(text)
+
     async with deps.session_factory() as session:
         visibility: str | None = None
         if not is_group:
             settings_row = await UserSettingsRepository(session).get_or_create(user_id)
             visibility = settings_row.default_visibility
 
-        note = await NoteRepository(session).create_text_note(
+        note = await NoteRepository(session).create_note(
             user_id=user_id,
             chat_id=chat_id,
             is_group=is_group,
             tg_message_id=tg_message_id,
+            source_type=classification.source_type,
+            source_url=classification.source_url,
             raw_text=text,
             visibility=visibility,
         )
@@ -60,10 +79,23 @@ async def save_text_note(
 
     if note is None:
         # ADR-8: a retried Telegram delivery for a message already saved.
-        return SaveTextNoteResult(created=False, note_id=None, visibility=None)
+        return SaveNoteResult(created=False, note_id=None, visibility=None)
 
-    enqueue_process_note(deps.fast_queue, note.id)
-    return SaveTextNoteResult(created=True, note_id=note.id, visibility=visibility)
+    if classification.source_type in _HEAVY_SOURCE_TYPES:
+        # No heavy queue/worker is wired in this deployment stage yet (M4)
+        # — nothing consumes it, so the note just sits pending. Saving is
+        # still correct: nothing is lost, and M4 only needs to add a
+        # consumer, not touch how the note got here.
+        pass
+    else:
+        enqueue_process_note(deps.fast_queue, note.id)
+
+    return SaveNoteResult(
+        created=True,
+        note_id=note.id,
+        visibility=visibility,
+        source_type=classification.source_type,
+    )
 
 
 async def toggle_privacy(deps: Deps, *, note_id: int, user_id: int) -> str | None:

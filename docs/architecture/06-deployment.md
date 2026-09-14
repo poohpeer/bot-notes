@@ -4,12 +4,20 @@
 
 | Образ | Содержимое | Примерный размер |
 |---|---|---|
-| `notes-app` | Python, aiogram, SQLAlchemy, RQ, trafilatura, httpx | ~400 МБ |
-| `notes-app-heavy` | `notes-app` + ffmpeg, yt-dlp, faster-whisper, веса `small` | ~1.5 ГБ |
+| `notes-app` | Python, aiogram, SQLAlchemy, RQ, trafilatura, httpx, yt-dlp, youtube-transcript-api | ~450 МБ |
+| `notes-app-heavy` | `notes-app` + ffmpeg, faster-whisper, веса `small` | ~1.5 ГБ |
 | `notes-embeddings` | FastAPI, sentence-transformers, torch CPU, веса модели | ~2.5 ГБ |
 
 Размеры - оценка порядка величины, это моё предположение; точные цифры
 будут известны после первой сборки.
+
+Поправка к M0/M1-варианту этой таблицы: `yt-dlp` живёт в `notes-app`, не
+только в `notes-app-heavy`. YouTube-экстрактор (заголовок, описание,
+субтитры - metadata-only) идёт по очереди `fast` (03-ingest.md), а `fast`
+обслуживает `notes-worker-fast` на образе `notes-app`, не `notes-app-heavy`.
+`yt-dlp` для metadata-only вызовов не требует ffmpeg - тот нужен только
+реальному скачиванию и ремуксу медиа (Instagram, M4), это и остаётся
+эксклюзивом `app-heavy`.
 
 Разделение `app` и `app-heavy` сделано ради того, чтобы под бота не тащил
 полтора гигабайта зависимостей, которые ему не нужны, и запускался за

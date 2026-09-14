@@ -7,7 +7,7 @@ import pytest
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from notes_bot.bot.logic import Deps, run_search, save_text_note, show_more, toggle_privacy
+from notes_bot.bot.logic import Deps, run_search, save_note, show_more, toggle_privacy
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
@@ -132,8 +132,8 @@ async def _add_note_with_chunk(
         return note.id
 
 
-async def test_save_text_note_private_chat_uses_default_visibility_and_enqueues(deps):
-    result = await save_text_note(
+async def test_save_note_private_chat_uses_default_visibility_and_enqueues(deps):
+    result = await save_note(
         deps, user_id=1, chat_id=1, is_group=False, tg_message_id=10, text="hello"
     )
     assert result.created is True
@@ -142,11 +142,9 @@ async def test_save_text_note_private_chat_uses_default_visibility_and_enqueues(
     assert deps.fast_queue.calls[0][2] == f"process_note:{result.note_id}"
 
 
-async def test_save_text_note_duplicate_is_not_created_and_not_enqueued(deps):
-    first = await save_text_note(
-        deps, user_id=1, chat_id=1, is_group=False, tg_message_id=11, text="a"
-    )
-    second = await save_text_note(
+async def test_save_note_duplicate_is_not_created_and_not_enqueued(deps):
+    first = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=11, text="a")
+    second = await save_note(
         deps, user_id=1, chat_id=1, is_group=False, tg_message_id=11, text="a again"
     )
     assert first.created is True
@@ -154,19 +152,73 @@ async def test_save_text_note_duplicate_is_not_created_and_not_enqueued(deps):
     assert len(deps.fast_queue.calls) == 1
 
 
-async def test_save_text_note_group_note_has_no_visibility(deps):
-    result = await save_text_note(
+async def test_save_note_group_note_has_no_visibility(deps):
+    result = await save_note(
         deps, user_id=1, chat_id=999, is_group=True, tg_message_id=12, text="in a group"
     )
     assert result.visibility is None
 
 
 async def test_toggle_privacy(deps):
-    saved = await save_text_note(
-        deps, user_id=1, chat_id=1, is_group=False, tg_message_id=13, text="x"
-    )
+    saved = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=13, text="x")
     new_vis = await toggle_privacy(deps, note_id=saved.note_id, user_id=1)
     assert new_vis == "public"
+
+
+async def test_save_note_classifies_a_page_url_and_enqueues_it(deps):
+    result = await save_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=14,
+        text="check this out https://example.com/article",
+    )
+    assert result.source_type == "page"
+    assert len(deps.fast_queue.calls) == 1
+
+
+async def test_save_note_classifies_a_youtube_url(deps):
+    result = await save_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=15,
+        text="https://youtu.be/abc123",
+    )
+    assert result.source_type == "youtube"
+
+
+async def test_save_note_stores_the_source_url_for_a_link(deps, db_engine):
+    result = await save_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=16,
+        text="https://example.com/article",
+    )
+    sf = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sf() as session:
+        note = await session.get(Note, result.note_id)
+        assert note.source_url == "https://example.com/article"
+
+
+async def test_save_note_does_not_enqueue_an_instagram_link_to_fast_queue(deps):
+    """No heavy queue/worker is wired yet (M4) — the note is saved but
+    nothing runs it until M4 adds a consumer."""
+    result = await save_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=17,
+        text="https://www.instagram.com/p/xyz/",
+    )
+    assert result.source_type == "instagram"
+    assert result.created is True
+    assert deps.fast_queue.calls == []
 
 
 async def test_run_search_caches_a_session_and_returns_first_page(deps, db_engine):

@@ -1,13 +1,13 @@
-"""RQ job functions — see docs/architecture/03-ingest.md and 08-roadmap.md, M2.
+"""RQ job functions — see docs/architecture/03-ingest.md and 08-roadmap.md.
 
 RQ runs job functions synchronously; each wraps an async implementation via
 `asyncio.run`, per job. Dependencies (engine, embedding client) are built
 lazily and cached at module scope — the worker process constructs them once
 and reuses them across jobs, rather than reconnecting per note.
 
-M2 scope: `source_type='text'` only. Other source types (page, youtube,
-instagram, map, voice) are M3/M4 and raise `NotImplementedError` here for
-now, rather than silently mis-indexing them.
+M3 scope: 'text' (no extractor), 'page', 'youtube', 'map'. 'voice' and
+'instagram' are M4 (heavy queue, not wired here yet) and raise
+NotImplementedError rather than silently mis-indexing them.
 """
 
 from __future__ import annotations
@@ -23,11 +23,24 @@ from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.db.models import Note
 from notes_bot.db.repositories import ChunkRepository, NoteRepository
 from notes_bot.domain.chunking import chunk
+from notes_bot.extractors.base import Extractor
+from notes_bot.extractors.map import MapExtractor
+from notes_bot.extractors.page import PageExtractor
+from notes_bot.extractors.youtube import YoutubeExtractor
 
 log = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker | None = None
+
+# Instantiated once and reused — each extractor is stateless (or only holds
+# injected clients), same rationale as the engine/session_factory caching
+# below.
+_EXTRACTORS: dict[str, Extractor] = {
+    "page": PageExtractor(),
+    "youtube": YoutubeExtractor(),
+    "map": MapExtractor(),
+}
 
 
 def _get_session_factory(settings: Settings) -> async_sessionmaker:
@@ -38,14 +51,35 @@ def _get_session_factory(settings: Settings) -> async_sessionmaker:
     return _session_factory
 
 
-def _index_text(note: Note) -> str:
-    """What gets chunked and embedded, by source_type — see
-    02-data-model.md, "Текст, идущий в индекс". Only 'text' exists yet."""
+async def _extract_and_get_index_text(
+    note: Note, note_repo: NoteRepository, extractors: dict[str, Extractor]
+) -> str:
+    """Runs the matching extractor (if any), persists what it found, and
+    returns the text that actually gets chunked — see 02-data-model.md,
+    "Текст, идущий в индекс", and 03-ingest.md, "Деградация".
+
+    A plain 'text' note has no extractor: raw_text is already the text. For
+    everything else, extracted_text wins when non-empty; an extractor that
+    failed or found nothing degrades to raw_text (the URL itself, still
+    findable) rather than failing the note.
+    """
     if note.source_type == "text":
         return note.raw_text or ""
-    raise NotImplementedError(
-        f"source_type={note.source_type!r} is not indexed yet — lands in M3/M4"
+
+    extractor = extractors.get(note.source_type)
+    if extractor is None:
+        raise NotImplementedError(
+            f"source_type={note.source_type!r} is not indexed yet — lands in M4"
+        )
+
+    result = await extractor.extract(note)
+    await note_repo.record_extraction(
+        note.id,
+        extracted_text=result.text or None,
+        lang=result.lang,
+        error=result.meta.get("error"),
     )
+    return result.text or note.raw_text or ""
 
 
 async def process_note_async(
@@ -53,7 +87,9 @@ async def process_note_async(
     *,
     session_factory: async_sessionmaker,
     embedding_client: HttpEmbeddingClient,
+    extractors: dict[str, Extractor] | None = None,
 ) -> None:
+    extractors = extractors if extractors is not None else _EXTRACTORS
     async with session_factory() as session:
         note_repo = NoteRepository(session)
         note = await note_repo.get(note_id)
@@ -80,10 +116,13 @@ async def process_note_async(
         assert note is not None  # just fetched above; nothing else deletes notes
 
         try:
-            text = _index_text(note)
+            text = await _extract_and_get_index_text(note, note_repo, extractors)
             chunks = chunk(text)
             if not chunks:
-                raise ValueError("note has no text to index")
+                # Only reached with nothing left to index at all — not even
+                # raw_text/the URL. This IS a real failure: the note is
+                # physically unfindable — see "Деградация".
+                raise ValueError("note has no text to index, even after degradation")
 
             vectors = await embedding_client.embed_passages([c.text for c in chunks])
             new_chunks = ChunkRepository.from_domain_chunks(chunks, vectors)

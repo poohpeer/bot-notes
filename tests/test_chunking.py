@@ -1,6 +1,6 @@
 import pytest
 
-from notes_bot.domain.chunking import chunk
+from notes_bot.domain.chunking import chunk, normalize
 
 
 def test_empty_text_yields_no_chunks():
@@ -72,3 +72,35 @@ def test_chunk_indices_are_sequential():
     text = " ".join(words)
     chunks = chunk(text, target=10, overlap=2, min_size=1)
     assert [c.index for c in chunks] == list(range(len(chunks)))
+
+
+def test_defaults_match_03_ingest_md():
+    """400/60/40/200 — the values fixed in "Шаг 4. Чанкинг", not this
+    module's own preference."""
+    words = [f"w{i}" for i in range(500)]
+    text = " ".join(words)
+    chunks = chunk(text)
+    assert chunks[0].token_count == 400
+    step = 400 - 60
+    assert chunks[1].text.split()[0] == f"w{step}"
+
+
+def test_normalize_drops_consecutive_duplicate_lines():
+    """Typical of YouTube auto-subtitles re-emitting the previous line as
+    new words scroll in — see 03-ingest.md, "Шаг 4"."""
+    text = "hello world\nhello world\nsomething new"
+    assert normalize(text) == "hello world something new"
+
+
+def test_normalize_keeps_non_consecutive_duplicates():
+    text = "a\nb\na"
+    assert normalize(text) == "a b a"
+
+
+def test_normalize_drops_blank_lines():
+    text = "a\n\n\nb"
+    assert normalize(text) == "a b"
+
+
+def test_normalize_is_a_noop_on_plain_single_line_text():
+    assert normalize("just one line of text") == "just one line of text"
