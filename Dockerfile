@@ -3,6 +3,12 @@
 
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS base
 
+# Without this, stdout/stderr are block-buffered in a container and a
+# SIGTERM/SIGKILL (a failed liveness probe, an OOM kill) can drop everything
+# written since the last flush — logs that would explain the crash never
+# reach `kubectl logs` at all.
+ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # Dependencies before source: the layer cache survives every code change.
