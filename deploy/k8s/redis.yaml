@@ -1,0 +1,67 @@
+# notes-bot-redis — backs the RQ queues (fast/llm/heavy) that
+# notes-worker-fast/-heavy consume from, see docs/architecture/06-deployment.md
+# and 05-contracts.md. The design treats Redis as an externally provided
+# dependency, but this cluster has none, so it's deployed alongside the app.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-bot-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notes-bot-redis
+  template:
+    metadata:
+      labels:
+        app: notes-bot-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes-bot-redis
+spec:
+  selector:
+    app: notes-bot-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# Only the bot and the workers may reach it — same rationale as
+# notes-embeddings-allow-app-only in embeddings.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notes-bot-redis-allow-app-only
+spec:
+  podSelector:
+    matchLabels:
+      app: notes-bot-redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: notes-bot
+        - podSelector:
+            matchLabels:
+              app: notes-worker-fast
+        - podSelector:
+            matchLabels:
+              app: notes-worker-heavy
+      ports:
+        - port: 6379

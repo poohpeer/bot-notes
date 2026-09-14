@@ -5,6 +5,7 @@ resources:
   - configmap.yaml
   # secret.yaml is gitignored and applied by hand — see secret.example.yaml
   - migrate-job.yaml
+  - redis.yaml
   - embeddings.yaml
   - app.yaml
   - worker-heavy.yaml
