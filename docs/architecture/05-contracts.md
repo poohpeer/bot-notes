@@ -83,11 +83,79 @@
   старте означает зависимость холодного старта от внешней сети и риск
   упереться в лимиты хаба.
 
-## proxy-ai
+## ai-proxy
 
-Контракт на момент проектирования не зафиксирован - это открытый вопрос
-дизайн-дока. Чтобы он не блокировал разработку, взаимодействие описано портом,
-а конкретный протокол - адаптером за ним.
+Контракт зафиксирован по репозиторию `poohpeer/ai-proxy` (README на коммите
+`e648574`). ai-proxy - хост-резидентный демон с единым REST-контрактом над
+несколькими провайдерами. Для этого бота используется провайдер `codex`
+(Codex CLI на подписочной аутентификации ChatGPT-аккаунта), это указание
+владельца продукта. Взаимодействие по-прежнему изолировано портом
+`LLMClient`, чтобы смена провайдера не задевала вызывающий код.
+
+### HTTP-контракт ai-proxy
+
+```jsonc
+// POST {AI_PROXY_URL}/v1/complete
+{
+  "provider": "codex",          // фиксировано для этого бота
+  "prompt": "...",              // обязателен, min_length 1
+  "system": "системный промпт", // опционально; для codex рендерится в developer_instructions
+  "output_format": "text",      // "text" | "json"; см. ниже, почему для codex всегда "text"
+  "json_schema": null,          // обязателен только при output_format="json"
+  "timeout_s": 60,              // опционально; дефолт для CLI-провайдеров 300 с
+  "history": []                 // опционально: [{"role":"user"|"assistant","content":"..."}], старые первыми
+}
+```
+
+Особенности провайдера `codex`, влияющие на контракт:
+
+- **`model` не передаётся.** Codex-CLI на ChatGPT-аккаунте всегда запускает
+  дефолтную модель аккаунта и отвергает явное имя. В теле запроса поле `model`
+  опускается (или `null`).
+- **Изображения не поддерживаются** (`supports_images() == false`). Для этого
+  бота не нужно - в LLM уходит только текст.
+- **Структурированный вывод по схеме недоступен.** `output_format="json"`
+  требует `json_schema` (иначе `400 missing_schema`), но CLI-адаптер codex
+  отвечает прозой и не заполняет `structured_output` - он всегда вернётся
+  `null`. Это проверено на соседнем проекте `bot-organizer`: запрос JSON по
+  схеме к CLI-провайдеру приходит пустым. Поэтому для codex используется
+  `output_format="text"`, а разбор JSON выполняет адаптер (см. ниже).
+- **Таймаут.** Дефолт CLI-провайдеров - 300 секунд (`AI_PROXY_CLI_TIMEOUT_S`).
+  Это существенно больше бюджета синхронного ожидания в чате, поэтому
+  `timeout_s` передаётся явно под каждую задачу (обогащение - минуты допустимо,
+  `/smart_search` - см. `04-search.md`, сделан асинхронным).
+
+Ответ (`output_format="text"`):
+
+```jsonc
+{
+  "provider": "codex",
+  "model": "...",               // модель, реально обслужившая запрос
+  "output_format": "text",
+  "result": "текст ответа модели",
+  "structured_output": null,
+  "tool_calls": [],
+  "metadata": { "cost_usd": 0.0, "duration_ms": 1234, "exit_code": 0, "raw_envelope": {} }
+}
+```
+
+### Ошибки ai-proxy
+
+Единый формат: `{ "error": { "type": "...", "message": "...", "detail": "..." } }`.
+
+| HTTP | `type` | Как обрабатываем |
+|---|---|---|
+| 503 | `quota_exhausted` | Все Codex-аккаунты исчерпали квоту. **Не ретраить вслепую** - квота восстанавливается по времени. Обогащение: `enrich_status='failed'` после исчерпания попыток с длинной задержкой. `/smart_search`: деградация до `/search` |
+| 504 | `timeout` | Превышен `timeout_s`. Обогащение ретраит, `/smart_search` деградирует |
+| 500 | `cli_error` / `parse_error` | Сбой CLI или неразборный вывод. Ретрай обогащения, деградация поиска |
+| 502 | `provider_error` / `provider_unreachable` | ai-proxy недоступен или провайдер упал. Как 500 |
+| 400 | `unavailable_provider`, `missing_schema`, ... | Ошибка запроса - баг интеграции, не ретраить, логировать |
+
+Ключевое отличие `503 quota_exhausted` от прочих ошибок: это не сбой запроса,
+а исчерпание общего ресурса подписки на время. Обработчик обязан отличать его
+и не гонять ретраи, которые лишь умножат нагрузку на исчерпанный аккаунт.
+
+### Порт LLMClient
 
 ```python
 class LLMClient(Protocol):
@@ -96,37 +164,67 @@ class LLMClient(Protocol):
         *,
         system: str,
         user: str,
-        max_tokens: int = 512,
-        temperature: float = 0.2,
-        json_schema: dict | None = None,   # структурированный вывод, если поддерживается
-        timeout: float = 30.0,
+        json_schema: dict | None = None,  # если задан - адаптер сам распарсит JSON из текста
+        history: list[dict] | None = None,
+        timeout_s: float = 60.0,
     ) -> LLMResult: ...
 
 @dataclass
 class LLMResult:
     text: str
-    parsed: dict | None       # заполняется при json_schema
-    model: str
-    usage: dict | None
+    parsed: dict | None       # заполняется, если был json_schema и разбор удался
+    model: str | None
+    usage: dict | None        # metadata из ответа: cost_usd, duration_ms
 ```
+
+Порт не содержит `max_tokens` и `temperature`: ai-proxy их не принимает
+(`CompleteRequest` таких полей не имеет), и передавать их некуда. Провайдер в
+`ProxyAILLMClient` захардкожен в `codex`.
 
 Три реализации:
 
 | Реализация | Назначение |
 |---|---|
-| `ProxyAILLMClient` | Боевая. Пишется, когда контракт станет известен |
+| `ProxyAILLMClient` | Боевая. `POST /v1/complete` с `provider="codex"`, `output_format="text"`, явным `timeout_s`; при `json_schema` сама извлекает и валидирует JSON |
 | `NullLLMClient` | Заглушка. `title` = первые слова текста, `tags` = пусто, `summary` = None, дубли не детектируются, `/smart_search` деградирует до `/search` |
 | `FakeLLMClient` | Тесты. Детерминированные ответы по ключу промпта |
 
 `NullLLMClient` включается флагом `LLM_ENABLED=false` и позволяет довести до
-рабочего состояния всё, кроме генеративных фич, не дожидаясь контракта. Это
-основная причина, по которой открытый вопрос не стоит на критическом пути.
+рабочего состояния всё, кроме генеративных фич, не дожидаясь готовности
+интеграции. Это причина, по которой обогащение не стоит на критическом пути.
 
-Если proxy-ai не поддерживает структурированный вывод по схеме, адаптер
-реализует его сам: просит JSON в промпте, парсит, валидирует по схеме, при
-неудаче делает одну повторную попытку с сообщением об ошибке парсинга, затем
-сдаётся и возвращает `parsed=None`. Вызывающий код обязан корректно
-переживать `parsed=None` - это не исключительная ситуация.
+**Разбор JSON адаптером.** codex структурированный вывод по схеме не отдаёт,
+поэтому `ProxyAILLMClient` реализует его сам: в промпт добавляется требование
+вернуть только JSON нужной формы, ответ приходит как `result` (текст), из него
+извлекается JSON (снятие ```json-ограждения), парсится и валидируется по
+`json_schema`. При неудаче - одна повторная попытка с сообщением об ошибке
+парсинга, затем `parsed=None`. Вызывающий код обязан корректно переживать
+`parsed=None` - это не исключительная ситуация.
+
+### Безопасность: блокер для LLM_ENABLED=true
+
+**`LLM_ENABLED=true` включается только после фикса в ai-proxy** (см. `07-decisions.md`,
+ADR-14 и риск R5). ai-proxy запускает codex командой `codex exec --json
+--dangerously-bypass-approvals-and-sandbox` - модель выполняет любые
+shell-команды без песочницы и подтверждения. Текст заметки - произвольный
+контент из интернета (страницы, субтитры, чужие сообщения в группе), в котором
+возможна инъекция инструкций. При включённом обогащении такой текст попадает в
+`prompt` и может заставить codex выполнить команду в своём контейнере, где
+смонтированы OAuth-токены аккаунтов.
+
+Требование к ai-proxy: для запросов без `mcp_url` (обогащение и `/smart_search`
+инструментов не используют) codex должен запускаться в песочнице только для
+чтения, а не с `--dangerously-bypass-approvals-and-sandbox`. Фикс - в репозитории
+`poohpeer/ai-proxy`, задача заведена там же. До него единственная безопасная
+конфигурация бота - `LLM_ENABLED=false`.
+
+### Развёртывание ai-proxy
+
+В Kubernetes ai-proxy - внутренний `ClusterIP`-сервис `ai-proxy` на порту
+`8787`, наружу не выставлен, без аутентификации. Из того же неймспейса -
+`http://ai-proxy:8787`, из другого - `http://ai-proxy.<namespace>.svc.cluster.local:8787`.
+`PROXY_AI_URL` в конфиге бота указывает на этот адрес; для одного неймспейса с
+ai-proxy - `http://ai-proxy:8787`.
 
 ### Промпты
 
@@ -186,8 +284,10 @@ def visibility_predicate(*, user_id: int, chat_id: int, is_group_chat: bool,
 | `EMBEDDINGS_URL` | `http://notes-embeddings:8000` | ConfigMap |
 | `EMBEDDING_DIM` | `768` | ConfigMap |
 | `EMBEDDING_MODEL_NAME` | `intfloat/multilingual-e5-base` | ConfigMap |
-| `PROXY_AI_URL` | - | Secret |
-| `LLM_ENABLED` | `false` до готовности контракта | ConfigMap |
+| `PROXY_AI_URL` | `http://ai-proxy:8787` | ConfigMap |
+| `LLM_ENABLED` | `false` до фикса песочницы в ai-proxy (ADR-14) | ConfigMap |
+| `LLM_ENRICH_TIMEOUT_S` | `120` | ConfigMap |
+| `LLM_SMART_SEARCH_TIMEOUT_S` | `180` | ConfigMap |
 | `WHISPER_MODEL` | `small` | ConfigMap |
 | `MAX_AUDIO_SECONDS` | `1200` | ConfigMap |
 | `MAX_DOWNLOAD_BYTES` | `104857600` | ConfigMap |

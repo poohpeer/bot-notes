@@ -10,7 +10,7 @@ sequenceDiagram
     participant Q as Redis / RQ
     participant W as Worker
     participant E as embeddings
-    participant AI as proxy-ai
+    participant AI as ai-proxy (codex)
 
     U->>B: сообщение
     B->>B: классификация источника
@@ -231,10 +231,12 @@ WHERE id = :id;
 удерживать блокировки. Батч ограничен по количеству текстов и по суммарной
 длине.
 
-## Шаг 6. Обогащение через proxy-ai
+## Шаг 6. Обогащение через ai-proxy
 
 Отдельная задача в очереди `llm`, отдельный статус. Никогда не блокирует
-`status='done'`: заметка находится поиском ещё до появления тегов.
+`status='done'`: заметка находится поиском ещё до появления тегов. Контракт
+ai-proxy - в `05-contracts.md` (провайдер `codex`, `output_format="text"`,
+`timeout_s` из `LLM_ENRICH_TIMEOUT_S`).
 
 | Фича | Вход | Выход |
 |---|---|---|
