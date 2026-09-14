@@ -6,8 +6,11 @@ Telegram groups.
 
 ## Status
 
-M0 (scaffold): configuration, data model, migrations, CI, image builds. The
-bot and workers don't do anything yet — see `docs/architecture/08-roadmap.md`.
+M0 (scaffold) + M1 (embedding service): configuration, data model,
+migrations, CI, image builds, `notes-embeddings` (`POST /embed`, `GET
+/model`). The embedding model choice is still open — needs a benchmark on
+real notes, see `services/embeddings/README.md`. The bot and workers don't
+do anything yet — see `docs/architecture/08-roadmap.md`.
 
 - [Design document](docs/design/notes-bot-design.md) — original requirements
 - [Architecture](docs/architecture/README.md) — target system design
