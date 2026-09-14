@@ -6,3 +6,4 @@ __pycache__/
 .env
 k8s/secret.yaml
 *.egg-info/
+.idea/
