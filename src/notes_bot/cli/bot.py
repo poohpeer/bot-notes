@@ -15,6 +15,7 @@ from aiohttp import web
 from redis import Redis
 from rq import Queue
 
+from notes_bot.bot.commands import set_bot_commands
 from notes_bot.bot.handlers import router
 from notes_bot.bot.logic import Deps
 from notes_bot.clients.embeddings import HttpEmbeddingClient
@@ -63,6 +64,14 @@ async def main() -> None:
     except Exception as exc:
         log.error("initial getMe failed: %s", exc)
         raise SystemExit(1) from exc
+
+    # Not readiness-gating: the menu is cosmetic (commands.py's own
+    # docstring) and BotFather already has whatever was set last, so a
+    # failure here shouldn't hold up polling — log and move on.
+    try:
+        await set_bot_commands(bot)
+    except Exception:
+        log.exception("failed to set bot command menu")
 
     deps = Deps(
         session_factory=create_session_factory(engine),
