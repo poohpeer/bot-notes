@@ -28,6 +28,7 @@ from rq import Queue
 from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from notes_bot.bot.render import render_places, render_smart_answer_failed
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
 from notes_bot.clients.llm import LLMClient, LLMServiceError, NullLLMClient, ProxyAILLMClient
 from notes_bot.clients.prompts import load_prompt
@@ -44,6 +45,7 @@ from notes_bot.domain.chunking import chunk
 from notes_bot.enrich import (
     find_duplicate,
     generate_place,
+    generate_places,
     generate_summary,
     generate_tags,
     generate_title,
@@ -320,6 +322,10 @@ async def enrich_note_async(
             structured: dict = {}
             if note.source_type == "map":
                 structured = await generate_place(llm_client, text, timeout_s=timeout_s)
+            elif note.source_type in ("youtube", "instagram"):
+                places = await generate_places(llm_client, text, timeout_s=timeout_s)
+                if places:
+                    structured = {"places": places}
 
             own_embedding = await chunk_repo.get_first_chunk_embedding(note_id)
             if own_embedding is not None:
@@ -416,11 +422,17 @@ async def smart_answer_async(
     top_n: int = 10,
     max_distance: float | None = None,
 ) -> None:
-    """`smart_answer` — see 04-search.md, "/smart_search": the synthesis
-    half of an already-shown search. Never surfaces an error to the user —
-    "при ошибке ai-proxy умный ответ просто не приходит, обычная выдача уже
-    показана" — this function's only failure mode is "return without
-    sending anything", logged, not raised.
+    """`smart_answer` — see 04-search.md, "/smart_search": the synthesis of
+    an already-queried search whose raw hits were never shown (the handler
+    sends only a pending marker before this runs). A failure here used to
+    just log and return, on the reasoning that the user already had the raw
+    results and losing only the synthesis was no big deal — with no raw
+    results shown any more, that would leave the pending marker as a silent
+    dead end, so every failure path below sends render_smart_answer_failed()
+    instead. "No matching notes" is the one exception: the handler already
+    checked hits were non-empty moments before enqueuing this, so a race
+    that empties it between the two searches is the only way to reach it,
+    and logging is enough for something that rare.
 
     ACL is enforced here, in the SQL that builds `hits`, before any note
     text reaches the LLM prompt — see 04-search.md: "единственный способ,
@@ -441,6 +453,7 @@ async def smart_answer_async(
             query_vector = await embedding_client.embed_query(query_text)
         except EmbeddingServiceError as exc:
             log.warning("smart_answer: user_id=%s embedding failed: %s", user_id, exc)
+            await sender.send(chat_id, render_smart_answer_failed())
             return
 
         predicate = visibility_predicate(
@@ -477,17 +490,25 @@ async def smart_answer_async(
             exc.is_quota_exhausted,
             exc,
         )
+        await sender.send(chat_id, render_smart_answer_failed())
         return
 
     if not result.text:
         log.info("smart_answer: user_id=%s empty synthesis, skipping", user_id)
+        await sender.send(chat_id, render_smart_answer_failed())
         return
 
-    sources = "\n".join(
-        f"[{h.note_id}] {h.title or h.chunk_text[:40]}"
-        + (f" — {h.source_url}" if h.source_url else "")
-        for h in hits
-    )
+    source_lines = []
+    for h in hits:
+        line = f"[{h.note_id}] {h.title or h.chunk_text[:40]}"
+        if h.source_url:
+            line += f" — {h.source_url}"
+        source_lines.append(line)
+        # /smart_search shows no raw cards any more (04-search.md) — this
+        # is the only place a video note's extracted places (render.py's
+        # render_places, from generate_places) ever reach the user.
+        source_lines.extend(f"  {place_line}" for place_line in render_places(h.structured))
+    sources = "\n".join(source_lines)
     answer = f"{result.text}\n\nИсточники:\n{sources}"
     await sender.send(chat_id, answer)
 

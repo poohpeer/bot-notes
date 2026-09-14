@@ -46,6 +46,23 @@ _PLACE_SCHEMA = {
         "cuisine": {"type": ["string", "null"]},
     },
 }
+_PLACES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "places": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": ["string", "null"]},
+                    "address_hint": {"type": ["string", "null"]},
+                },
+            },
+        }
+    },
+    "required": ["places"],
+}
+_PLACES_MAX = 5
 _DUPES_SCHEMA = {
     "type": "object",
     "properties": {
@@ -107,6 +124,37 @@ async def generate_place(llm: LLMClient, text: str, *, timeout_s: float) -> dict
     if result.parsed is None:
         return {}
     return {k: v for k, v in result.parsed.items() if v}
+
+
+async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> list[dict]:
+    """For `youtube`/`instagram` notes: places mentioned in a video's
+    caption/transcript, each `{"name": ..., "address_hint": ...}` — see
+    04-search.md/03-ingest.md, "Места из видео". Unlike `generate_place`,
+    a video can plausibly mention several places, not describe exactly one."""
+    result = await llm.complete(
+        system=load_prompt("places"),
+        user=text[:_HEAD_CHARS],
+        json_schema=_PLACES_SCHEMA,
+        timeout_s=timeout_s,
+    )
+    if result.parsed is None:
+        return []
+    places = result.parsed.get("places")
+    if not isinstance(places, list):
+        return []
+    cleaned = []
+    for place in places:
+        if not isinstance(place, dict):
+            continue
+        name = place.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        cleaned_place = {"name": name.strip()}
+        hint = place.get("address_hint")
+        if isinstance(hint, str) and hint.strip():
+            cleaned_place["address_hint"] = hint.strip()
+        cleaned.append(cleaned_place)
+    return cleaned[:_PLACES_MAX]
 
 
 async def find_duplicate(

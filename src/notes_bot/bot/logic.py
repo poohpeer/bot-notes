@@ -281,6 +281,7 @@ def _to_renderable(hit) -> RenderableHit:
         chunk_text=hit.chunk_text,
         # Delete button rendering is M6 scope; ownership isn't surfaced yet.
         is_owner=False,
+        structured=hit.structured,
     )
 
 
@@ -293,6 +294,7 @@ def _to_renderable_from_note(note, chunk_text: str) -> RenderableHit:
         tags=note.tags,
         chunk_text=chunk_text,
         is_owner=False,
+        structured=note.structured,
     )
 
 
@@ -307,6 +309,7 @@ def _to_renderable_own(note) -> RenderableHit:
         tags=note.tags,
         chunk_text=note.extracted_text or note.raw_text or "",
         is_owner=True,
+        structured=note.structured,
     )
 
 

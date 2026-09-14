@@ -1,3 +1,5 @@
+from urllib.parse import unquote
+
 from notes_bot.bot.render import (
     RenderableHit,
     render_capture_mode_changed,
@@ -11,6 +13,7 @@ from notes_bot.bot.render import (
     render_no_more_results,
     render_note_deleted,
     render_note_restored,
+    render_places,
     render_privacy_toggle_confirmation,
     render_search_card,
     render_search_expired,
@@ -27,6 +30,7 @@ def _hit(**kw) -> RenderableHit:
         tags=[],
         chunk_text="some note text",
         is_owner=True,
+        structured={},
     )
     defaults.update(kw)
     return RenderableHit(**defaults)
@@ -76,6 +80,35 @@ def test_card_fragment_is_truncated():
     lines = card.splitlines()
     assert len(lines[1]) <= 200
     assert lines[1].endswith("…")
+
+
+def test_card_includes_places_as_maps_links():
+    structured = {"places": [{"name": "Кахелеби", "address_hint": "Кахетинское шоссе"}]}
+    card = render_search_card(_hit(title="x", structured=structured))
+    assert "📍 Кахелеби — https://www.google.com/maps/search/?api=1&query=" in card
+    assert "Кахелеби Кахетинское шоссе" in unquote(card.split("query=")[1])
+
+
+def test_card_omits_places_line_when_none():
+    card = render_search_card(_hit(title="x", structured={}))
+    assert "📍" not in card
+
+
+def test_render_places_skips_entries_with_no_name():
+    lines = render_places({"places": [{"address_hint": "no name here"}]})
+    assert lines == []
+
+
+def test_render_places_works_without_address_hint():
+    lines = render_places({"places": [{"name": "Ботанический сад"}]})
+    assert len(lines) == 1
+    assert lines[0].startswith("📍 Ботанический сад — ")
+
+
+def test_render_places_on_malformed_structured_is_empty():
+    assert render_places({}) == []
+    assert render_places({"places": "not a list"}) == []
+    assert render_places({"places": ["not a dict"]}) == []
 
 
 def test_no_more_results_message():

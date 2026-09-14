@@ -5,6 +5,7 @@ docs/architecture/04-search.md, "Рендер выдачи".
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 
 _SOURCE_ICONS = {
     "text": "📝",
@@ -28,11 +29,44 @@ class RenderableHit:
     tags: list[str]
     chunk_text: str
     is_owner: bool
+    structured: dict
 
 
 def render_privacy_toggle_confirmation(visibility: str) -> str:
     label = "приватная 🔒" if visibility == "private" else "публичная 🌐"
     return f"Заметка теперь {label}."
+
+
+def _google_maps_search_url(query: str) -> str:
+    # No geocoding step anywhere in this pipeline — a search URL (Google's
+    # own documented fallback for "I have a name/address, not coordinates")
+    # instead of a pin, since generate_places (enrich.py) only ever extracts
+    # text out of a caption/ASR transcript, never a verified lat/lng.
+    return f"https://www.google.com/maps/search/?api=1&query={quote(query)}"
+
+
+def render_places(structured: dict) -> list[str]:
+    """`structured["places"]` — see enrich.py's `generate_places`: a
+    youtube/instagram note's places, extracted from its caption/transcript.
+    One line per place, each a Google Maps search link built from whatever
+    text the LLM found — no guarantee it resolves to exactly the right
+    result, since the source text itself (often an ASR transcript) can
+    mangle a name or address (03-ingest.md notes this under "Места из
+    видео")."""
+    places = structured.get("places") if isinstance(structured, dict) else None
+    if not isinstance(places, list):
+        return []
+    lines = []
+    for place in places:
+        if not isinstance(place, dict):
+            continue
+        name = place.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        hint = place.get("address_hint")
+        query = f"{name} {hint}" if isinstance(hint, str) and hint.strip() else name
+        lines.append(f"📍 {name} — {_google_maps_search_url(query)}")
+    return lines
 
 
 def render_search_card(hit: RenderableHit) -> str:
@@ -49,6 +83,8 @@ def render_search_card(hit: RenderableHit) -> str:
 
     if hit.source_url:
         lines.append(hit.source_url)
+
+    lines.extend(render_places(hit.structured))
 
     return "\n".join(lines)
 
@@ -79,11 +115,19 @@ def render_group_note_saved() -> str:
 
 
 def render_smart_answer_pending() -> str:
-    """04-search.md's mermaid: shown right after the ordinary results, in
-    place of a synchronous typing indicator — the synthesis itself runs on
-    a worker and may take minutes, so there's nothing to keep "typing" for
-    from the bot process."""
+    """04-search.md's mermaid: shown in place of a synchronous typing
+    indicator — the synthesis itself runs on a worker and may take minutes,
+    so there's nothing to keep "typing" for from the bot process."""
     return "🧠 Готовлю умный ответ по вашим заметкам…"
+
+
+def render_smart_answer_failed() -> str:
+    """/smart_search no longer shows the raw cards alongside the pending
+    marker (04-search.md) — a silent failure now leaves the pending marker
+    as a dead end instead of a shrug next to results the user already has,
+    so smart_answer_async sends this instead of just logging and returning
+    on its failure paths."""
+    return "Не получилось подготовить умный ответ. Попробуйте ещё раз."
 
 
 def render_group_welcome() -> str:

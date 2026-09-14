@@ -136,12 +136,20 @@ async def on_smart_search(message: Message, deps: Deps) -> None:
         is_group_chat=is_group_chat,
         query_text=query_text,
     )
-    await _send_page(message, page.hits, page.has_more, page.session_id)
-    if page.hits and deps.settings.llm_enabled:
-        # 04-search.md's mermaid: "Обычная выдача сразу + пометка «готовлю
-        # умный ответ»" — the synthesis itself is a separate message later,
-        # from the worker (see queue/tasks.py's smart_answer).
+    if not page.hits:
+        await message.answer(render_no_more_results())
+        return
+    if deps.settings.llm_enabled:
+        # No raw search cards — /smart_search's whole point is the LLM's
+        # synthesized answer, not the notes behind it (04-search.md); a
+        # pending marker instead of silence, since the answer itself is a
+        # separate message the worker sends 20-40s later (queue/tasks.py's
+        # smart_answer).
         await message.answer(render_smart_answer_pending())
+    else:
+        # LLM_ENABLED=false means no synthesis is ever coming — the raw
+        # cards are the only answer this query will get, same as /search.
+        await _send_page(message, page.hits, page.has_more, page.session_id)
 
 
 @router.callback_query(F.data.startswith("more:"))

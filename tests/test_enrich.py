@@ -4,6 +4,7 @@ from notes_bot.clients.llm import FakeLLMClient, LLMResult, NullLLMClient
 from notes_bot.enrich import (
     find_duplicate,
     generate_place,
+    generate_places,
     generate_summary,
     generate_tags,
     generate_title,
@@ -76,6 +77,41 @@ async def test_generate_place_drops_null_and_empty_fields():
 
 async def test_generate_place_returns_empty_dict_when_nothing_parsed():
     assert await generate_place(NullLLMClient(), "text", timeout_s=10) == {}
+
+
+async def test_generate_places_keeps_only_entries_with_a_name():
+    llm = ScriptedLLMClient(
+        {
+            "places": [
+                {"name": "Кахелеби", "address_hint": "Кахетинское шоссе"},
+                {"name": None, "address_hint": "no name, dropped"},
+                {"name": "  ", "address_hint": "blank name, dropped"},
+            ]
+        }
+    )
+    places = await generate_places(llm, "text", timeout_s=10)
+    assert places == [{"name": "Кахелеби", "address_hint": "Кахетинское шоссе"}]
+
+
+async def test_generate_places_strips_empty_address_hint():
+    llm = ScriptedLLMClient({"places": [{"name": "Ботанический сад", "address_hint": "  "}]})
+    places = await generate_places(llm, "text", timeout_s=10)
+    assert places == [{"name": "Ботанический сад"}]
+
+
+async def test_generate_places_caps_at_five():
+    llm = ScriptedLLMClient({"places": [{"name": f"place{i}"} for i in range(10)]})
+    places = await generate_places(llm, "text", timeout_s=10)
+    assert len(places) == 5
+
+
+async def test_generate_places_returns_empty_list_when_nothing_parsed():
+    assert await generate_places(NullLLMClient(), "text", timeout_s=10) == []
+
+
+async def test_generate_places_returns_empty_list_when_places_is_not_a_list():
+    llm = ScriptedLLMClient({"places": "not a list"})
+    assert await generate_places(llm, "text", timeout_s=10) == []
 
 
 async def test_find_duplicate_returns_none_with_no_candidates():
