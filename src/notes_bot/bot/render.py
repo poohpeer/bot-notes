@@ -19,6 +19,18 @@ _SOURCE_ICONS = {
 _FRAGMENT_MAX = 200
 _TITLE_FALLBACK_MAX = 60
 
+# A link-type note (youtube/instagram/page/map) has raw_text == source_url
+# verbatim right after saving — extracted_text/title only exist once
+# process_note/enrich_note finish. Without this, an untitled, unextracted
+# note showed the same link three times: truncated as the heading, in full
+# as the "fragment", and again as the source_url line.
+_PENDING_HEADING = {
+    "youtube": "YouTube-видео",
+    "instagram": "Instagram-видео",
+    "page": "Страница",
+    "map": "Место",
+}
+
 
 @dataclass(frozen=True)
 class RenderableHit:
@@ -71,12 +83,21 @@ def render_places(structured: dict) -> list[str]:
 
 def render_search_card(hit: RenderableHit) -> str:
     icon = _SOURCE_ICONS.get(hit.source_type, "📝")
-    heading = hit.title or _truncate(hit.chunk_text, _TITLE_FALLBACK_MAX)
+    chunk = hit.chunk_text.strip()
+    is_bare_url = bool(hit.source_url) and chunk == hit.source_url.strip()
+
+    if hit.title:
+        heading = hit.title
+    elif is_bare_url:
+        heading = _PENDING_HEADING.get(hit.source_type, "Заметка")
+    else:
+        heading = _truncate(chunk, _TITLE_FALLBACK_MAX)
     lines = [f"{icon} {heading}"]
 
-    fragment = _truncate(hit.chunk_text, _FRAGMENT_MAX)
-    if fragment and fragment != heading:
-        lines.append(fragment)
+    if not is_bare_url:
+        fragment = _truncate(chunk, _FRAGMENT_MAX)
+        if fragment and fragment != heading:
+            lines.append(fragment)
 
     if hit.tags:
         lines.append(" ".join(f"#{t}" for t in hit.tags))

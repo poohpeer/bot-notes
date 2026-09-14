@@ -82,6 +82,28 @@ def test_card_fragment_is_truncated():
     assert lines[1].endswith("…")
 
 
+def test_card_for_a_not_yet_extracted_link_note_shows_the_url_once():
+    """Before process_note/enrich_note finish, chunk_text (raw_text) is the
+    pasted link itself, verbatim — without special-casing this, the card
+    showed it three times: truncated as the heading, in full as the
+    "fragment", and again as the source_url line."""
+    url = "https://www.instagram.com/reel/DdOdsrnIeBX/?stkn=MTB3YWhyZGUwUwerRxaQ=="
+    card = render_search_card(
+        _hit(title=None, source_type="instagram", chunk_text=url, source_url=url)
+    )
+    assert card.count(url) == 1
+    assert card.startswith("📷 Instagram-видео")
+
+
+def test_card_for_a_titled_link_note_still_shows_the_url_once():
+    url = "https://www.instagram.com/reel/DdOdsrnIeBX/"
+    card = render_search_card(
+        _hit(title="A Reel", source_type="instagram", chunk_text=url, source_url=url)
+    )
+    assert card.count(url) == 1
+    assert card.startswith("📷 A Reel")
+
+
 def test_card_includes_places_as_maps_links():
     structured = {"places": [{"name": "Кахелеби", "address_hint": "Кахетинское шоссе"}]}
     card = render_search_card(_hit(title="x", structured=structured))

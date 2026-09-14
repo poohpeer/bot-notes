@@ -99,10 +99,10 @@ async def test_generate_places_strips_empty_address_hint():
     assert places == [{"name": "Ботанический сад"}]
 
 
-async def test_generate_places_caps_at_five():
+async def test_generate_places_returns_every_place_no_cap():
     llm = ScriptedLLMClient({"places": [{"name": f"place{i}"} for i in range(10)]})
     places = await generate_places(llm, "text", timeout_s=10)
-    assert len(places) == 5
+    assert len(places) == 10
 
 
 async def test_generate_places_returns_empty_list_when_nothing_parsed():

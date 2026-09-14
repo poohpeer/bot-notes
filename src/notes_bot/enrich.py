@@ -62,7 +62,6 @@ _PLACES_SCHEMA = {
     },
     "required": ["places"],
 }
-_PLACES_MAX = 5
 _DUPES_SCHEMA = {
     "type": "object",
     "properties": {
@@ -154,7 +153,7 @@ async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> lis
         if isinstance(hint, str) and hint.strip():
             cleaned_place["address_hint"] = hint.strip()
         cleaned.append(cleaned_place)
-    return cleaned[:_PLACES_MAX]
+    return cleaned
 
 
 async def find_duplicate(
