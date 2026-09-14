@@ -38,12 +38,18 @@ async def search_notes(
     candidate_k: int,
     limit: int,
     offset: int,
+    max_distance: float | None = None,
 ) -> list[SearchHit]:
     """Returns up to `limit` hits, ordered by relevance, starting at `offset`.
 
     Pass `limit = page_size + 1` to learn whether another page exists (the
     caller drops the extra row before rendering) — see 04-search.md,
     "Пагинация".
+
+    `max_distance` (pgvector cosine_distance, 0 = identical direction) drops
+    hits past it instead of always returning up to `limit` regardless of how
+    weak the match is — with few notes in the corpus, the corpus itself
+    doesn't out-compete an unrelated top match into oblivion.
     """
     started = time.perf_counter()
     try:
@@ -55,6 +61,7 @@ async def search_notes(
             candidate_k=candidate_k,
             limit=limit,
             offset=offset,
+            max_distance=max_distance,
         )
     finally:
         # 06-deployment.md, "Латентность /search p50/p95" — timed around
@@ -72,6 +79,7 @@ async def _search_notes(
     candidate_k: int,
     limit: int,
     offset: int,
+    max_distance: float | None,
 ) -> list[SearchHit]:
     distance = NoteChunk.embedding.cosine_distance(query_vector)
 
@@ -115,6 +123,8 @@ async def _search_notes(
         .limit(limit)
         .offset(offset)
     )
+    if max_distance is not None:
+        page_stmt = page_stmt.where(best.c.distance <= max_distance)
 
     result = await session.execute(page_stmt)
     return [

@@ -200,6 +200,43 @@ async def test_acl_predicate_is_applied(db_session):
     assert [h.note_id for h in hits] == [mine.id]
 
 
+async def test_max_distance_drops_weak_matches(db_session):
+    close = await _make_note(db_session)
+    far = await _make_note(db_session)
+    await _add_chunk(db_session, close, text="close", embedding=_vec(0.99, 0.01))
+    # orthogonal to the query -> cosine_distance 1.0
+    await _add_chunk(db_session, far, text="far", embedding=_vec(0.0, 1.0))
+
+    hits = await search_notes(
+        db_session,
+        query_vector=QUERY,
+        acl_predicate=EVERYTHING_VISIBLE,
+        active_model=MODEL,
+        candidate_k=200,
+        limit=10,
+        offset=0,
+        max_distance=0.5,
+    )
+    assert [h.note_id for h in hits] == [close.id]
+
+
+async def test_max_distance_none_keeps_the_old_unfiltered_behavior(db_session):
+    far = await _make_note(db_session)
+    await _add_chunk(db_session, far, text="far", embedding=_vec(0.0, 1.0))
+
+    hits = await search_notes(
+        db_session,
+        query_vector=QUERY,
+        acl_predicate=EVERYTHING_VISIBLE,
+        active_model=MODEL,
+        candidate_k=200,
+        limit=10,
+        offset=0,
+        max_distance=None,
+    )
+    assert [h.note_id for h in hits] == [far.id]
+
+
 async def test_records_search_duration(db_session):
     """06-deployment.md, "Латентность /search p50/p95"."""
     before = REGISTRY.get_sample_value("notes_search_duration_seconds_count") or 0.0

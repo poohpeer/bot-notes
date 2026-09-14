@@ -414,6 +414,7 @@ async def smart_answer_async(
     timeout_s: float,
     sender: Sender,
     top_n: int = 10,
+    max_distance: float | None = None,
 ) -> None:
     """`smart_answer` — see 04-search.md, "/smart_search": the synthesis
     half of an already-shown search. Never surfaces an error to the user —
@@ -453,6 +454,7 @@ async def smart_answer_async(
             candidate_k=200,
             limit=top_n,
             offset=0,
+            max_distance=max_distance,
         )
 
     if not hits:
@@ -511,5 +513,6 @@ def smart_answer(user_id: int, chat_id: int, is_group_chat: bool, query_text: st
             llm_enabled=settings.llm_enabled,
             timeout_s=settings.llm_smart_search_timeout_s,
             sender=TelegramSender(settings.telegram_bot_token),
+            max_distance=settings.search_max_distance,
         )
     )

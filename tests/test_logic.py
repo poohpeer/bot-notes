@@ -67,6 +67,11 @@ def _settings(**overrides) -> Settings:
         EMBEDDING_MODEL_NAME=MODEL,
         SEARCH_PAGE_SIZE=2,
         SEARCH_CANDIDATE_K=200,
+        # These tests are about pagination/ACL/caching mechanics, not
+        # relevance — several deliberately include a "far" note (orthogonal
+        # embedding) to exercise a later page, not to be filtered out.
+        # Relevance filtering itself is tests/test_search.py's job.
+        SEARCH_MAX_DISTANCE=None,
     )
     base.update(overrides)
     return Settings(**base)

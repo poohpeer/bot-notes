@@ -174,6 +174,7 @@ async def run_search(
             candidate_k=deps.settings.search_candidate_k,
             limit=50,
             offset=0,
+            max_distance=deps.settings.search_max_distance,
         )
 
     if not hits:
