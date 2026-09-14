@@ -12,8 +12,11 @@ data:
   # internal ClusterIP address, not a secret. Assumes the same namespace as
   # ai-proxy — otherwise use the namespaced FQDN, see 05-contracts.md.
   PROXY_AI_URL: "http://ai-proxy:8787"
-  # False until the ai-proxy codex sandbox fix ships — ADR-14, risk R5 in
-  # docs/architecture/07-decisions.md. Flip only after that fix is deployed.
+  # The ai-proxy codex sandbox fix this was blocked on (ADR-14, risk R5 in
+  # docs/architecture/07-decisions.md) has shipped — ai-proxy#15 merged and
+  # deployed. Still "false" here: flipping to "true" is now a deliberate
+  # product/cost decision for whoever operates this deployment, not a
+  # security blocker.
   LLM_ENABLED: "false"
   LLM_ENRICH_TIMEOUT_S: "120"
   LLM_SMART_SEARCH_TIMEOUT_S: "180"

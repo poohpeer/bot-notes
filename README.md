@@ -17,11 +17,11 @@ raw text is indexed instead (degradation, see `03-ingest.md`).
 
 After saving, a note is asynchronously enriched via ai-proxy (title, tags,
 summary, structured place fields for maps, duplicate detection) — but
-`LLM_ENABLED=false` by default and **must stay `false` in production** until
-the codex sandbox fix in `poohpeer/ai-proxy` ships (ADR-14, risk R5 in
-`07-decisions.md`; the fix is `ai-proxy#15`, not merged). Without it,
-everything works without titles and tags — `NullLLMClient` is substituted
-automatically.
+`LLM_ENABLED=false` by default. The codex sandbox fix this was blocked on
+(ADR-14, risk R5 in `07-decisions.md`) has shipped — `ai-proxy#15` merged
+and deployed — so flipping the flag to `true` in production is now a
+product/cost decision, not a security blocker. Without it, everything works
+without titles and tags — `NullLLMClient` is substituted automatically.
 
 M6 (groups and note management): the bot works in group "rooms" — saves
 mentions and replies to itself (`/capture_all` turns on "all" mode, warning
