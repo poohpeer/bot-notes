@@ -42,17 +42,19 @@ class Settings(BaseSettings):
     # pgvector cosine_distance (0 = identical direction). Unset (None) keeps
     # the old always-return-up-to-limit behavior.
     #
-    # 0.5 was the first guess and turned out far too loose: for short note
-    # texts, intfloat/multilingual-e5-base packs everything into a
-    # surprisingly narrow band regardless of topic — a real production
-    # query ("порекомендуй уличную еду в тбилиси") measured 0.145 against
-    # the actually-relevant video note but only 0.206-0.221 against
-    # unrelated grocery notes ("Купить хлеб", "Купить молоко"). 0.25 still
-    # isn't a properly calibrated value, just tightened against that one
-    # real data point — revisit once there's enough real query/note traffic
-    # to calibrate against properly (e.g. by looking at the distance
-    # distribution of hits users actually acted on vs. ignored).
-    search_max_distance: float | None = Field(default=0.25, alias="SEARCH_MAX_DISTANCE")
+    # 0.5, then 0.25, were both too loose against the same real example: for
+    # short note texts, intfloat/multilingual-e5-base packs everything into
+    # a surprisingly narrow band regardless of topic — a real query
+    # ("порекомендуй уличную еду в тбилиси") measured 0.145 against the
+    # actually-relevant video note but only 0.206-0.221 against unrelated
+    # grocery notes ("Купить хлеб", "Купить молоко"). 0.18 sits in that
+    # ~0.06-wide gap. An absolute cutoff is a blunt tool for a model this
+    # compressed — a relative-margin threshold (keep hits within some delta
+    # of the *best* hit's distance, rather than a fixed ceiling) would adapt
+    # to that automatically and is worth switching to once there's enough
+    # real query/note traffic to calibrate against properly, instead of
+    # hand-tuning this single number against one example a third time.
+    search_max_distance: float | None = Field(default=0.18, alias="SEARCH_MAX_DISTANCE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     # notes-bot's /healthz + /readyz — see 06-deployment.md, "Health-пробы".
     health_port: int = Field(default=8080, alias="HEALTH_PORT")
