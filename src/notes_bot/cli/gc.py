@@ -88,11 +88,29 @@ async def reclaim_stuck(
             await session.commit()
 
         for note in result.reclaimed:
+            # The repository already committed this note to 'pending' with
+            # attempts+1 before this loop ever runs — a broken Redis here
+            # cannot be rolled back into that decision. What it must not do
+            # is take the rest of the batch down with it: an unguarded
+            # exception on note N used to abort every note after it in the
+            # same pass, and silently, since nothing downstream of the crash
+            # ever got a chance to alert either. Left un-enqueued, the note
+            # stays 'pending' and is picked up again on the next run — the
+            # cost is one attempt spent on an infra blip, not the note's own
+            # fault, rather than every sibling in the batch going unhandled.
             is_heavy = note.source_type in _HEAVY_SOURCE_TYPES
             queue = heavy_queue if is_heavy else fast_queue
-            enqueue_process_note(
-                queue, note.id, job_timeout=heavy_job_timeout_s if is_heavy else None
-            )
+            try:
+                enqueue_process_note(
+                    queue, note.id, job_timeout=heavy_job_timeout_s if is_heavy else None
+                )
+            except Exception:
+                log.exception(
+                    "notes-gc: note_id=%s reclaimed in the database but could not be "
+                    "re-enqueued; it stays 'pending' and will be retried next run",
+                    note.id,
+                )
+                continue
             await alerts.reclaimed(
                 note_id=note.id,
                 source_type=note.source_type,
