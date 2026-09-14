@@ -72,7 +72,8 @@ sequenceDiagram
 3. Для личного чата: visibility = user_settings.default_visibility (дефолт 'private')
    Для группы: visibility = NULL
 4. Выбрать очередь: instagram и voice → heavy, всё остальное → fast
-5. enqueue с job_id = f"note:{note_id}" - защита от двойной постановки
+5. enqueue с job_id = f"process_note-{note_id}" - защита от двойной постановки
+   (дефис, не двоеточие: RQ 2.x запрещает в job_id всё, кроме `[A-Za-z0-9_-]`)
 6. Ответить пользователю сразу, не дожидаясь обработки
 ```
 

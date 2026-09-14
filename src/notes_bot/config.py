@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     # notes-bot's /healthz + /readyz — see 06-deployment.md, "Health-пробы".
     health_port: int = Field(default=8080, alias="HEALTH_PORT")
+    # notes-gc — see 08-roadmap.md M8 and 03-ingest.md.
+    gc_retention_days: int = Field(default=30, alias="GC_RETENTION_DAYS")
+    gc_stuck_processing_minutes: int = Field(default=30, alias="GC_STUCK_PROCESSING_MINUTES")
+    gc_batch_size: int = Field(default=500, alias="GC_BATCH_SIZE")
 
 
 @lru_cache(maxsize=1)

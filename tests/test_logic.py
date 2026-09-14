@@ -157,7 +157,7 @@ async def test_save_note_private_chat_uses_default_visibility_and_enqueues(deps)
     assert result.created is True
     assert result.visibility == "private"
     assert len(deps.fast_queue.calls) == 1
-    assert deps.fast_queue.calls[0][2] == f"process_note:{result.note_id}"
+    assert deps.fast_queue.calls[0][2] == f"process_note-{result.note_id}"
 
 
 async def test_save_note_duplicate_is_not_created_and_not_enqueued(deps):
@@ -241,7 +241,7 @@ async def test_edit_note_text_re_enqueues_processing(deps):
 
     assert await edit_note_text(deps, note_id=saved.note_id, user_id=1, new_text="new") is True
     assert len(deps.fast_queue.calls) == 1
-    assert deps.fast_queue.calls[0][2] == f"process_note:{saved.note_id}"
+    assert deps.fast_queue.calls[0][2] == f"process_note-{saved.note_id}"
 
 
 async def test_edit_note_text_refuses_a_different_user(deps):

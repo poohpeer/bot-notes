@@ -10,6 +10,7 @@ of the mutation itself rather than a separate SELECT (04-search.md, "Удале�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import ColumnElement, case, delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -97,6 +98,54 @@ class NoteRepository:
             raw_text=raw_text,
             visibility=visibility,
         )
+
+    async def get_by_import_id(self, *, chat_id: int, import_id: str) -> Note | None:
+        """tools/import_telegram_export.py's idempotency key — see
+        03-ingest.md, "Импорт экспорта Telegram". `tg_message_id` is
+        deliberately NULL for every imported note (export ids don't match
+        what the live bot will later see for the same chat), so
+        `uq_notes_tg_message` can't dedupe imports; `structured.import_id`
+        does instead, checked here before insert rather than as a DB
+        constraint, per the design doc."""
+        result = await self._session.execute(
+            select(Note).where(
+                Note.chat_id == chat_id, Note.structured["import_id"].astext == import_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def create_imported_note(
+        self,
+        *,
+        user_id: int,
+        chat_id: int,
+        source_type: str,
+        source_url: str | None,
+        raw_text: str,
+        created_at: datetime,
+        import_id: str,
+    ) -> Note:
+        """Always a group note (`is_group=True`, `visibility=NULL`) and
+        always `tg_message_id=NULL` — see 03-ingest.md, "Импорт экспорта
+        Telegram". `created_at` is the export's own date, not import time,
+        so imported notes sort correctly alongside live ones."""
+        note = Note(
+            user_id=user_id,
+            chat_id=chat_id,
+            is_group=True,
+            tg_message_id=None,
+            visibility=None,
+            source_type=source_type,
+            source_url=source_url,
+            raw_text=raw_text,
+            status="pending",
+            structured={"import_id": import_id},
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        self._session.add(note)
+        await self._session.flush()
+        return note
 
     async def record_extraction(
         self, note_id: int, *, extracted_text: str | None, lang: str | None, error: str | None
@@ -244,6 +293,40 @@ class NoteRepository:
             .values(deleted_at=None)
         )
         return result.rowcount > 0
+
+    async def hard_delete_expired(self, *, before: datetime, limit: int) -> int:
+        """notes-gc, see 08-roadmap.md M8 and 02-data-model.md's `idx_notes_gc`.
+        Batched via a subquery + LIMIT so one GC pass never holds a single
+        multi-million-row transaction open (07-decisions.md R7: no long
+        transactions on the shared Postgres). `note_chunks` cascades via
+        `ON DELETE CASCADE`."""
+        subq = (
+            select(Note.id)
+            .where(Note.deleted_at.is_not(None), Note.deleted_at < before)
+            .limit(limit)
+        )
+        result = await self._session.execute(delete(Note).where(Note.id.in_(subq)))
+        return result.rowcount
+
+    async def reclaim_stuck(self, *, before: datetime, limit: int) -> list[Note]:
+        """notes-gc's other job: a worker that crashed or was killed mid-job
+        leaves a note in `status='processing'` forever — RQ's own job never
+        retries because the job itself is gone, not failed. `idx_notes_unfinished`
+        exists for exactly this scan. Returns the reclaimed rows (id +
+        source_type) so the caller knows which queue to re-enqueue each one
+        into."""
+        subq = (
+            select(Note.id)
+            .where(Note.status.in_(("pending", "processing")), Note.updated_at < before)
+            .limit(limit)
+        )
+        result = await self._session.execute(
+            update(Note)
+            .where(Note.id.in_(subq))
+            .values(status="pending", attempts=Note.attempts + 1)
+            .returning(Note)
+        )
+        return list(result.scalars())
 
     async def edit_text(self, note_id: int, user_id: int, new_text: str) -> bool:
         """Only for `source_type='text'` — a voice transcript or a page's

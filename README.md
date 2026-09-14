@@ -39,8 +39,17 @@ without a shared Dispatcher. No step rewrites the query (see
 an ai-proxy error, or an empty response — nothing arrives, and the
 `/search` part has already run.
 
-M8 (garbage collection, importing old groups) and M9
-(operations/observability) are the next stages — see
+M8 (garbage collection, importing old groups): `notes-gc` (daily CronJob) —
+hard-deletes notes soft-deleted more than `GC_RETENTION_DAYS` ago (30 days
+by default), and reclaims notes stuck in `pending`/`processing` (worker
+crashed or killed) back into the queue via a deterministic `job_id` — see
+`notes_bot/cli/gc.py`. `tools/import_telegram_export.py` parses `result.json`
+from a Telegram Desktop export, classifies each message the same way a live
+`/save` does, and is idempotent via `structured.import_id` (`tg_message_id`
+on imported notes is always NULL — export ids don't match what the bot will
+see live for the same chat).
+
+M9 (operations/observability) is the next stage — see
 `docs/architecture/08-roadmap.md`.
 
 The embedding model choice is still open — needs a benchmark on real notes,
@@ -101,8 +110,7 @@ docker build --target app-heavy -t notes-bot-app-heavy .
 ## Kubernetes
 
 `deploy/k8s/` — ConfigMap, the migration Job, `notes-embeddings`, `notes-bot`,
-`notes-worker-fast`, `notes-worker-heavy`. `notes-gc` (CronJob) lands with
-M8, once soft-delete exists.
+`notes-worker-fast`, `notes-worker-heavy`, `notes-gc` (CronJob, `0 3 * * *`).
 
 ```bash
 kubectl apply -f deploy/k8s/secret.yaml   # copy from secret.example.yaml, never commit it
