@@ -10,3 +10,4 @@ resources:
   - app.yaml
   - worker-heavy.yaml
   - gc.yaml
+  - gc-reclaim.yaml

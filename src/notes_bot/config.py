@@ -62,6 +62,31 @@ class Settings(BaseSettings):
     gc_retention_days: int = Field(default=30, alias="GC_RETENTION_DAYS")
     gc_stuck_processing_minutes: int = Field(default=30, alias="GC_STUCK_PROCESSING_MINUTES")
     gc_batch_size: int = Field(default=500, alias="GC_BATCH_SIZE")
+    # A note reclaimed this many times without ever reaching 'done' is
+    # abandoned instead: marked 'failed' with its own error, not re-enqueued
+    # again. Without this, a source that can never succeed (a private
+    # Instagram account, a since-deleted video) would be picked up, die, and
+    # get reclaimed forever, once per GC_STUCK_PROCESSING_MINUTES window —
+    # forever spending a worker slot on something that will never finish.
+    gc_max_attempts: int = Field(default=3, alias="GC_MAX_ATTEMPTS")
+    # `heavy` (Instagram/voice: yt-dlp download + ffmpeg + faster-whisper)
+    # has no explicit RQ job_timeout today, so it inherits RQ's own default,
+    # 180s — too tight the moment a worker pod has to fetch faster-whisper's
+    # weights from Hugging Face cold (observed live: transcription of a
+    # 2-minute reel was still running at 180s). This is a ceiling, not a
+    # target — raising it costs nothing on a job that finishes in seconds.
+    heavy_job_timeout_s: int = Field(default=900, alias="HEAVY_JOB_TIMEOUT_S")
+    # Where a reclaimed or abandoned note is reported — see clients/alerts.py.
+    # Both unset turns alerts off rather than failing to start, same as
+    # ai-proxy's own AI_PROXY_TELEGRAM_* pair (this can point at the same
+    # bot/chat; it is its own pair of settings because the two services are
+    # deployed independently).
+    alerts_telegram_bot_token: str | None = Field(default=None, alias="ALERTS_TELEGRAM_BOT_TOKEN")
+    alerts_telegram_chat_id: str | None = Field(default=None, alias="ALERTS_TELEGRAM_CHAT_ID")
+    # A note settles into 'done'/'failed' for good, so a genuine repeat of
+    # the *same* alert for the *same* note cannot normally happen — this is
+    # a safety net against a GC run racing itself, not a real dedup window.
+    alerts_min_interval_minutes: float = Field(default=5.0, alias="ALERTS_MIN_INTERVAL_MINUTES")
     # Worker processes' Prometheus port — see 06-deployment.md, "Наблюдаемость".
     # notes-bot itself serves /metrics on HEALTH_PORT instead (see health.py).
     metrics_port: int = Field(default=9090, alias="METRICS_PORT")

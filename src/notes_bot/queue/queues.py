@@ -15,7 +15,9 @@ def get_queues(redis_conn: Redis) -> dict[str, Queue]:
     return {name: Queue(name, connection=redis_conn) for name in ("fast", "heavy", "llm")}
 
 
-def enqueue_process_note(fast_queue: Queue, note_id: int) -> None:
+def enqueue_process_note(
+    fast_queue: Queue, note_id: int, *, job_timeout: int | None = None
+) -> None:
     """Deterministic job_id (ADR-8). A dash, not a colon (docs/architecture/
     03-ingest.md's snippet used `note:{id}`): RQ 2.x's `validate_job_id`
     rejects any character outside `[A-Za-z0-9_-]`.
@@ -28,8 +30,14 @@ def enqueue_process_note(fast_queue: Queue, note_id: int) -> None:
     shared, last enqueue wins), and process_note itself no-ops a second run
     once the note is no longer 'pending'/'processing' (see queue/tasks.py,
     "already settled, skipping") — so a duplicate is wasted worker time, not
-    a duplicate write."""
-    fast_queue.enqueue(process_note, note_id, job_id=f"process_note-{note_id}")
+    a duplicate write.
+
+    `job_timeout` is None for the fast queue (RQ's own default, 180s, is
+    plenty for text/pages) and `settings.heavy_job_timeout_s` for the heavy
+    one — see Settings.heavy_job_timeout_s for why 180s is too tight there."""
+    fast_queue.enqueue(
+        process_note, note_id, job_id=f"process_note-{note_id}", job_timeout=job_timeout
+    )
 
 
 def enqueue_smart_answer(

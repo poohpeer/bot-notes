@@ -129,6 +129,14 @@ jobs:
             ${{ env.IMAGE_NAME }}-${{ matrix.target }}:v${{ github.run_number }}
             ${{ env.IMAGE_NAME }}-${{ matrix.target }}:latest
             ${{ env.IMAGE_NAME }}-${{ matrix.target }}:${{ github.sha }}
+          # Only app-heavy's Dockerfile stage reads this (Whisper's own
+          # weights, see its comment there); harmless on the `app` build,
+          # which never reaches that ARG. A fresh value every run busts
+          # exactly that one layer's cache so the image never silently
+          # drifts behind Hugging Face's current weights for the model
+          # Settings.whisper_model defaults to.
+          build-args: |
+            WHISPER_CACHE_BUST=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -224,6 +232,7 @@ jobs:
           Pin-Image "deploy/k8s/app.yaml" $app
           Pin-Image "deploy/k8s/migrate-job.yaml" $app
           Pin-Image "deploy/k8s/gc.yaml" $app
+          Pin-Image "deploy/k8s/gc-reclaim.yaml" $app
           Pin-Image "deploy/k8s/worker-heavy.yaml" $appHeavy
           Pin-Image "deploy/k8s/embeddings.yaml" $embeddings
 

@@ -27,6 +27,16 @@ class NewChunk:
     embedding: list[float]
 
 
+@dataclass(frozen=True)
+class ReclaimResult:
+    """`reclaim_stuck`'s two outcomes, kept apart because the caller does a
+    different thing with each: re-enqueue `reclaimed`, alert-and-stop on
+    `abandoned`."""
+
+    reclaimed: list[Note]
+    abandoned: list[Note]
+
+
 class NoteRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -179,8 +189,17 @@ class NoteRepository:
         return {n.id: n for n in result.scalars()}
 
     async def mark_processing(self, note_id: int) -> None:
+        """`updated_at=func.now()` here, not just `server_default` at INSERT,
+        is the heartbeat `reclaim_stuck` reads: without it, `updated_at`
+        never moves past a note's creation time, so a note that was merely
+        queued for a while (nothing wrong, the heavy queue was just busy)
+        looks exactly as stale as one whose worker actually died the
+        instant it picked the job up — and would be reclaimed mid-run,
+        racing a second worker onto the same note."""
         await self._session.execute(
-            update(Note).where(Note.id == note_id).values(status="processing")
+            update(Note)
+            .where(Note.id == note_id)
+            .values(status="processing", updated_at=func.now())
         )
 
     async def mark_done(self, note_id: int) -> None:
@@ -315,25 +334,67 @@ class NoteRepository:
         result = await self._session.execute(delete(Note).where(Note.id.in_(subq)))
         return result.rowcount
 
-    async def reclaim_stuck(self, *, before: datetime, limit: int) -> list[Note]:
+    async def reclaim_stuck(
+        self, *, before: datetime, limit: int, max_attempts: int
+    ) -> ReclaimResult:
         """notes-gc's other job: a worker that crashed or was killed mid-job
         leaves a note in `status='processing'` forever — RQ's own job never
         retries because the job itself is gone, not failed. `idx_notes_unfinished`
-        exists for exactly this scan. Returns the reclaimed rows (id +
-        source_type) so the caller knows which queue to re-enqueue each one
-        into."""
-        subq = (
-            select(Note.id)
-            .where(Note.status.in_(("pending", "processing")), Note.updated_at < before)
-            .limit(limit)
-        )
-        result = await self._session.execute(
-            update(Note)
-            .where(Note.id.in_(subq))
-            .values(status="pending", attempts=Note.attempts + 1)
-            .returning(Note)
-        )
-        return list(result.scalars())
+        exists for exactly this scan.
+
+        A note already reclaimed `max_attempts` times is abandoned instead
+        of reclaimed again: `attempts` only ever moves on a real failure or a
+        reclaim (never on an ordinary success), so a source that can never
+        succeed would otherwise die and get reclaimed forever, once per GC
+        pass.
+
+        The candidate ids are read once, up front, and the reclaim/abandon
+        split decided from that snapshot before either UPDATE runs — not by
+        re-querying `attempts`/`status` for the second branch, which would
+        see the first branch's own writes. `status='pending'` is one of the
+        very states this scan matches, so a note the first UPDATE just
+        reclaimed to 'pending' at exactly `max_attempts` would otherwise be
+        re-read by the second UPDATE and abandoned in the same pass it was
+        reclaimed in.
+        """
+        candidates = (
+            await self._session.execute(
+                select(Note.id, Note.attempts)
+                .where(
+                    Note.status.in_(("pending", "processing")),
+                    Note.updated_at < before,
+                )
+                .limit(limit)
+            )
+        ).all()
+        reclaim_ids = [note_id for note_id, attempts in candidates if attempts < max_attempts]
+        abandon_ids = [note_id for note_id, attempts in candidates if attempts >= max_attempts]
+
+        reclaimed: list[Note] = []
+        if reclaim_ids:
+            result = await self._session.execute(
+                update(Note)
+                .where(Note.id.in_(reclaim_ids))
+                .values(status="pending", attempts=Note.attempts + 1)
+                .returning(Note)
+            )
+            reclaimed = list(result.scalars())
+
+        abandoned: list[Note] = []
+        if abandon_ids:
+            result = await self._session.execute(
+                update(Note)
+                .where(Note.id.in_(abandon_ids))
+                .values(
+                    status="failed",
+                    attempts=Note.attempts + 1,
+                    error=f"не обработалась после {max_attempts} попыток — воркер не отвечал",
+                )
+                .returning(Note)
+            )
+            abandoned = list(result.scalars())
+
+        return ReclaimResult(reclaimed=reclaimed, abandoned=abandoned)
 
     async def edit_text(self, note_id: int, user_id: int, new_text: str) -> bool:
         """Only for `source_type='text'` — a voice transcript or a page's

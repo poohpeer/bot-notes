@@ -65,6 +65,48 @@ async def test_mark_processing_then_done(db_session):
     assert (await repo.get(note.id)).status == "done"
 
 
+async def test_mark_processing_bumps_updated_at(db_session):
+    """The heartbeat notes-gc's reclaim_stuck reads: without this, a note
+    that merely waited a while for a free worker (nothing wrong, the queue
+    was just busy) would look exactly as stale as one whose worker died the
+    instant it started — updated_at would still equal the note's original
+    created_at either way.
+
+    Read back through a plain Core SELECT rather than repo.get(): the
+    ORM-mapped `note` object stays in the session's identity map, and
+    mark_processing's `updated_at=func.now()` (a SQL expression, not
+    something SQLAlchemy can evaluate in Python) marks that attribute
+    expired rather than updating it in place — a bare attribute access on
+    the same object would then need its own implicit reload, which the
+    asyncio extension does not allow outside an explicit `await`.
+
+    Backdated with a literal Python datetime, not another `func.now()`: the
+    whole test runs inside one transaction (this fixture's isolation
+    mechanism), and Postgres's `now()` is transaction-scoped — a second
+    `func.now()` in the same transaction would equal the first exactly,
+    proving nothing.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select, update
+
+    from notes_bot.db.models import Note
+
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=99, raw_text="x", visibility="private"
+    )
+    stale = datetime.now(UTC) - timedelta(hours=1)
+    await db_session.execute(update(Note).where(Note.id == note.id).values(updated_at=stale))
+    await db_session.flush()
+
+    await repo.mark_processing(note.id)
+    await db_session.flush()
+
+    result = await db_session.execute(select(Note.updated_at).where(Note.id == note.id))
+    assert result.scalar_one() > stale
+
+
 async def test_mark_failed_records_error_and_increments_attempts(db_session):
     repo = NoteRepository(db_session)
     note = await repo.create_text_note(
