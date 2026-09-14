@@ -23,6 +23,20 @@ dev = [
 testpaths = ["tests"]
 asyncio_mode = "auto"
 
+# The service only ever runs model.encode() on CPU (see main.py — no
+# nvidia.com/gpu resource is ever requested, homelab has no GPU either).
+# PyPI's default torch wheel bundles the full CUDA runtime regardless
+# (~9GB of nvidia-* libraries never touched), which is most of why the
+# built image was 11GB+ and took over 10 minutes to pull on a home
+# connection. This index carries CPU-only wheels instead.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

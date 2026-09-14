@@ -24,14 +24,23 @@ spec:
           # PyTorch sizes its thread pool from the *host's* CPU count, blind
           # to the cgroup limit below — on a shared node that means far more
           # threads than the container can actually run at once, causing
-          # scheduling thrash that pushes single-request inference past
+          # scheduling thrash that pushes inference past
           # EMBEDDINGS_QUEUE_TIMEOUT_S (429 "at capacity") even with no real
           # concurrent load. Pin the thread pool to the CPU limit instead.
+          #
+          # EMBEDDINGS_QUEUE_TIMEOUT_S=30: the default (10s) was tuned
+          # against a single short string; a real note can batch up to
+          # EMBEDDINGS_MAX_BATCH_SIZE=64 chunks (a long YouTube transcript,
+          # in practice) in one call, and that genuinely takes longer than
+          # 10s on this CPU budget — observed timing out 3 times running
+          # against real traffic even with the thread pinning above.
           env:
             - name: OMP_NUM_THREADS
-              value: "2"
+              value: "3"
             - name: MKL_NUM_THREADS
-              value: "2"
+              value: "3"
+            - name: EMBEDDINGS_QUEUE_TIMEOUT_S
+              value: "30"
           ports:
             - containerPort: 8000
           resources:
@@ -39,7 +48,12 @@ spec:
               cpu: 500m
               memory: 1Gi
             limits:
-              cpu: 1500m
+              # 3000m, not 1500m: the node has 8 idle cores (homelab kind
+              # cluster, single tenant) and a real batch of chunks is
+              # genuinely compute-bound here, not just badly scheduled —
+              # more headroom shortens the batch itself, where the timeout
+              # bump above only tolerates it.
+              cpu: 3000m
               memory: 2560Mi
           # Loading the model from disk takes tens of seconds; startupProbe
           # keeps liveness from firing during that window instead of racing
