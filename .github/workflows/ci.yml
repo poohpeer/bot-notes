@@ -243,10 +243,18 @@ jobs:
           kubectl apply -k deploy/k8s/
           if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
 
+      # apply -k above starts the migrate Job and all four Deployments'
+      # pulls at once, and they queue behind each other on the homelab's
+      # actual uplink rather than pulling in parallel — a freshly pushed
+      # ~100MB app image alone was observed waiting 2m41s behind the others
+      # for a 1.9s pull. 180s was tuned for local compute time, not this
+      # contention; the embeddings image (~1GB, model baked in) was observed
+      # taking over 10 minutes stuck in ContainerCreating for the same
+      # reason, hence its own longer budget below.
       - name: Wait for migration
         shell: powershell
         run: |
-          kubectl wait --for=condition=complete job/notes-bot-migrate --timeout=180s
+          kubectl wait --for=condition=complete job/notes-bot-migrate --timeout=600s
           if ($LASTEXITCODE -ne 0) {
             kubectl logs job/notes-bot-migrate --tail=100
             throw "migration did not complete"
@@ -255,13 +263,13 @@ jobs:
       - name: Wait for rollout
         shell: powershell
         run: |
-          kubectl rollout status deployment/notes-embeddings --timeout=180s
+          kubectl rollout status deployment/notes-embeddings --timeout=900s
           if ($LASTEXITCODE -ne 0) { throw "notes-embeddings rollout did not complete" }
-          kubectl rollout status deployment/notes-bot --timeout=180s
+          kubectl rollout status deployment/notes-bot --timeout=600s
           if ($LASTEXITCODE -ne 0) { throw "notes-bot rollout did not complete" }
-          kubectl rollout status deployment/notes-worker-fast --timeout=180s
+          kubectl rollout status deployment/notes-worker-fast --timeout=600s
           if ($LASTEXITCODE -ne 0) { throw "notes-worker-fast rollout did not complete" }
-          kubectl rollout status deployment/notes-worker-heavy --timeout=180s
+          kubectl rollout status deployment/notes-worker-heavy --timeout=600s
           if ($LASTEXITCODE -ne 0) { throw "notes-worker-heavy rollout did not complete" }
 
       # A completed rollout only means the pod started, not that it is
