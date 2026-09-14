@@ -19,6 +19,15 @@ from pydantic import BaseModel, Field
 from embeddings_service.config import Settings, get_settings
 from embeddings_service.model import EmbeddingModel, Kind, SentenceTransformerModel
 
+# uvicorn's own dictConfig (see its --log-config default) only wires up the
+# "uvicorn"/"uvicorn.error"/"uvicorn.access" loggers, not the root logger —
+# without this, every log.info/log.warning call in this module (this file's
+# "model ready" line included) propagates to a handler-less root logger and
+# is silently dropped, while uvicorn's own access log lines print fine right
+# next to them. Observed in CI: the deploy job's own log-line check for
+# "model ready" failed even though the service was actually up and serving.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s: %(message)s")
+
 log = logging.getLogger(__name__)
 
 ModelLoader = Callable[[], EmbeddingModel]
