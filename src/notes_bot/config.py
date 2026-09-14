@@ -40,11 +40,19 @@ class Settings(BaseSettings):
     search_candidate_k: int = Field(default=200, alias="SEARCH_CANDIDATE_K")
     search_page_size: int = Field(default=5, alias="SEARCH_PAGE_SIZE")
     # pgvector cosine_distance (0 = identical direction). Unset (None) keeps
-    # the old always-return-up-to-limit behavior; 0.5 is a rough starting
-    # cutoff for intfloat/multilingual-e5-base, not an empirically tuned
-    # one — revisit against real query/note pairs once there's enough
-    # traffic to calibrate against.
-    search_max_distance: float | None = Field(default=0.5, alias="SEARCH_MAX_DISTANCE")
+    # the old always-return-up-to-limit behavior.
+    #
+    # 0.5 was the first guess and turned out far too loose: for short note
+    # texts, intfloat/multilingual-e5-base packs everything into a
+    # surprisingly narrow band regardless of topic — a real production
+    # query ("порекомендуй уличную еду в тбилиси") measured 0.145 against
+    # the actually-relevant video note but only 0.206-0.221 against
+    # unrelated grocery notes ("Купить хлеб", "Купить молоко"). 0.25 still
+    # isn't a properly calibrated value, just tightened against that one
+    # real data point — revisit once there's enough real query/note traffic
+    # to calibrate against properly (e.g. by looking at the distance
+    # distribution of hits users actually acted on vs. ignored).
+    search_max_distance: float | None = Field(default=0.25, alias="SEARCH_MAX_DISTANCE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     # notes-bot's /healthz + /readyz — see 06-deployment.md, "Health-пробы".
     health_port: int = Field(default=8080, alias="HEALTH_PORT")
