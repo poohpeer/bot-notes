@@ -7,13 +7,14 @@ Telegram groups.
 ## Status
 
 M0 (scaffold) + M1 (embedding service) + M2 (text notes and search) + M3
-(links): you can send the bot text or a link (a regular page, YouTube, a
-short maps link) in a private chat, toggle privacy with a button, find a
-note with `/search`. A regular link is indexed via `trafilatura`, YouTube via
-title/description/subtitles, a map link via the place name from the final
-URL; a failed extraction doesn't fail the note — the raw text is indexed
-instead (degradation, see `03-ingest.md`). Transcription, LLM enrichment and
-groups are the next stages — see `docs/architecture/08-roadmap.md`.
+(links) + M4 (transcription): you can send the bot text, a link (a regular
+page, YouTube, a short maps link), or a voice message in a private chat,
+toggle privacy with a button, find a note with `/search`. Voice notes and
+Instagram posts are transcribed via `faster-whisper` on a separate heavy
+worker (`notes-worker-heavy`), without blocking a plain text save. A failed
+extraction doesn't fail the note — the raw text is indexed instead
+(degradation, see `03-ingest.md`). LLM enrichment and groups are the next
+stages — see `docs/architecture/08-roadmap.md`.
 
 The embedding model choice is still open — needs a benchmark on real notes,
 see `services/embeddings/README.md`.
@@ -72,11 +73,16 @@ docker build --target app-heavy -t notes-bot-app-heavy .
 
 ## Kubernetes
 
-`deploy/k8s/` — ConfigMap and the migration Job (M0). Deployment manifests
-for the bot and workers land with M2, once those processes actually do
-something.
+`deploy/k8s/` — ConfigMap, the migration Job, `notes-embeddings`, `notes-bot`,
+`notes-worker-fast`, `notes-worker-heavy`. `notes-gc` (CronJob) lands with
+M8, once soft-delete exists.
 
 ```bash
 kubectl apply -f deploy/k8s/secret.yaml   # copy from secret.example.yaml, never commit it
 kubectl apply -k deploy/k8s/
 ```
+
+Real transcription time on the cluster node's CPU hasn't been measured —
+this environment has no network access, and therefore no way to run
+`faster-whisper` against real audio (see risk R2 in `07-decisions.md`).
+Measure it on the first real deployment, as the roadmap expects.

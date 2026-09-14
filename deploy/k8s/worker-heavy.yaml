@@ -1,0 +1,51 @@
+# notes-worker-heavy — the `notes-app-heavy` image (ffmpeg, faster-whisper),
+# a separate Deployment from notes-worker-fast so transcription never blocks
+# a plain text save. See docs/architecture/06-deployment.md, "Почему тяжёлый
+# воркер отдельно".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-worker-heavy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notes-worker-heavy
+  template:
+    metadata:
+      labels:
+        app: notes-worker-heavy
+    spec:
+      # RQ lets an in-flight job finish on SIGTERM; a long transcription
+      # must not be cut off on every deploy. The job is idempotent
+      # (re-processing a note is safe, see ADR-8) so a hard kill past this
+      # window just re-queues, but this window exists to make that rare.
+      terminationGracePeriodSeconds: 600
+      imagePullSecrets:
+        - name: notes-bot-ghcr-pull-secret
+      containers:
+        - name: worker
+          image: ghcr.io/poohpeer/bot-notes-app-heavy:latest
+          command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.worker", "heavy"]
+          envFrom:
+            - configMapRef:
+                name: notes-bot-config
+            - secretRef:
+                name: notes-bot-secrets
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1536Mi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        # emptyDir, not the container's own writable layer — see
+        # 03-ingest.md, "Ограничения тяжёлого пути": "Временные файлы:
+        # emptyDir, удаление в finally". A pod restart drops it entirely,
+        # which is the point — nothing here is meant to survive one.
+        - name: scratch
+          emptyDir: {}

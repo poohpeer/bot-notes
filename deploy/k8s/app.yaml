@@ -1,0 +1,88 @@
+# notes-bot and notes-worker-fast — both run the `notes-app` image (see
+# docs/architecture/06-deployment.md, "Единицы развёртывания" and "Образы").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-bot
+spec:
+  # Exactly one — two `getUpdates` consumers on the same Telegram token
+  # would split updates between them (01-context.md).
+  replicas: 1
+  strategy:
+    # RollingUpdate would briefly run old and new pods together, which
+    # `replicas: 1` above exists specifically to prevent — see ADR-11.
+    type: Recreate
+  selector:
+    matchLabels:
+      app: notes-bot
+  template:
+    metadata:
+      labels:
+        app: notes-bot
+    spec:
+      terminationGracePeriodSeconds: 30
+      imagePullSecrets:
+        - name: notes-bot-ghcr-pull-secret
+      containers:
+        - name: bot
+          image: ghcr.io/poohpeer/bot-notes-app:latest
+          ports:
+            - name: health
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: notes-bot-config
+            - secretRef:
+                name: notes-bot-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-worker-fast
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notes-worker-fast
+  template:
+    metadata:
+      labels:
+        app: notes-worker-fast
+    spec:
+      imagePullSecrets:
+        - name: notes-bot-ghcr-pull-secret
+      containers:
+        - name: worker
+          image: ghcr.io/poohpeer/bot-notes-app:latest
+          # fast before llm: user-facing saves take priority over
+          # enrichment — see 06-deployment.md.
+          command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.worker", "fast", "llm"]
+          envFrom:
+            - configMapRef:
+                name: notes-bot-config
+            - secretRef:
+                name: notes-bot-secrets
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

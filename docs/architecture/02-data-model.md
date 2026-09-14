@@ -148,7 +148,7 @@ CREATE TABLE chat_settings (
 | `source_type` | Текст для индексации |
 |---|---|
 | `text` | `raw_text` |
-| `voice` | `extracted_text` (транскрипт); `raw_text` содержит подпись к голосовому, если она была |
+| `voice` | `extracted_text` = `caption + "\n\n" + транскрипт` (собирается экстрактором, как у `instagram`; `caption` в `raw_text`, если он был) |
 | `page` | `extracted_text`, при пустом - `raw_text` (то есть сам URL) |
 | `youtube` | `заголовок + описание + субтитры` (собирается экстрактором в `extracted_text`) |
 | `instagram` | `caption + "\n\n" + транскрипт` (собирается экстрактором в `extracted_text`) |

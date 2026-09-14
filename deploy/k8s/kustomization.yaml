@@ -6,7 +6,8 @@ resources:
   # secret.yaml is gitignored and applied by hand — see secret.example.yaml
   - migrate-job.yaml
   - embeddings.yaml
+  - app.yaml
+  - worker-heavy.yaml
 
-# Deployments for bot, worker-fast, worker-heavy, gc land with M2 onward,
-# once each process does something real — see docs/architecture/08-roadmap.md.
-# notes-embeddings ships now (M1) because /embed is what M1 delivers.
+# notes-gc (CronJob) is M8 — nothing to garbage-collect meaningfully before
+# soft-delete (M6) exists. See docs/architecture/08-roadmap.md.

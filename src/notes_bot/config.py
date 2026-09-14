@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     search_candidate_k: int = Field(default=200, alias="SEARCH_CANDIDATE_K")
     search_page_size: int = Field(default=5, alias="SEARCH_PAGE_SIZE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    # notes-bot's /healthz + /readyz — see 06-deployment.md, "Health-пробы".
+    health_port: int = Field(default=8080, alias="HEALTH_PORT")
 
 
 @lru_cache(maxsize=1)

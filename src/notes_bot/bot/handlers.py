@@ -1,10 +1,19 @@
 """aiogram handlers — thin adapters over bot/logic.py. Parses/formats
 Telegram objects and delegates every decision to the pure logic layer.
 
-Private chats only: text, page, YouTube, and map links, classified by
-domain.classify (M3), /search + /search_mine + /search_all (M2). Voice
-messages and Instagram links aren't wired in yet (M4); group capture
-(ADR-10) is M6.
+Private chats only: text, page/YouTube/map/Instagram links (classified by
+domain.classify) and voice messages, /search + /search_mine + /search_all.
+Group capture (ADR-10) is M6.
+
+Known gap: 03-ingest.md's flow diagram has the worker notify the bot when a
+note finishes processing, and — for voice specifically — "Бот отвечает на
+голосовое распознанным текстом, чтобы пользователь сразу видел, что именно
+уйдёт в индекс". That notification channel (worker process -> running bot
+process) isn't built yet for any source_type, not just voice; this handler
+only sends the immediate "saving" acknowledgement, the same as every other
+note. Voice notes are still fully indexed and searchable once the heavy
+worker finishes — this only affects the "see the transcript immediately"
+UX touch.
 """
 
 from __future__ import annotations
@@ -14,13 +23,21 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 from notes_bot.bot.keyboards import privacy_keyboard, search_more_keyboard
-from notes_bot.bot.logic import Deps, run_search, save_note, show_more, toggle_privacy
+from notes_bot.bot.logic import (
+    Deps,
+    run_search,
+    save_note,
+    save_voice_note,
+    show_more,
+    toggle_privacy,
+)
 from notes_bot.bot.render import (
     render_no_more_results,
     render_note_saved,
     render_privacy_toggle_confirmation,
     render_search_card,
     render_search_expired,
+    render_voice_note_saved,
 )
 from notes_bot.db.repositories import UserSettingsRepository
 
@@ -129,5 +146,24 @@ async def on_note_message(message: Message, deps: Deps) -> None:
         return
     await message.answer(
         render_note_saved(visibility=result.visibility),
+        reply_markup=privacy_keyboard(result.note_id, result.visibility),
+    )
+
+
+@router.message(F.chat.type == "private", F.voice)
+async def on_voice_message(message: Message, deps: Deps) -> None:
+    result = await save_voice_note(
+        deps,
+        user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        is_group=False,
+        tg_message_id=message.message_id,
+        file_id=message.voice.file_id,
+        caption=message.caption,
+    )
+    if not result.created:
+        return
+    await message.answer(
+        render_voice_note_saved(visibility=result.visibility),
         reply_markup=privacy_keyboard(result.note_id, result.visibility),
     )
