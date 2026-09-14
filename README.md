@@ -6,11 +6,14 @@ Telegram groups.
 
 ## Status
 
-M0 (scaffold) + M1 (embedding service): configuration, data model,
-migrations, CI, image builds, `notes-embeddings` (`POST /embed`, `GET
-/model`). The embedding model choice is still open — needs a benchmark on
-real notes, see `services/embeddings/README.md`. The bot and workers don't
-do anything yet — see `docs/architecture/08-roadmap.md`.
+M0 (scaffold) + M1 (embedding service) + M2 (text notes and search — a
+minimal useful system): you can send the bot text in a private chat, toggle
+privacy with a button, find a note with `/search`, switch mode with
+`/search_mine` / `/search_all`. Links, transcription, LLM enrichment and
+groups are the next stages — see `docs/architecture/08-roadmap.md`.
+
+The embedding model choice is still open — needs a benchmark on real notes,
+see `services/embeddings/README.md`.
 
 - [Design document](docs/design/notes-bot-design.md) — original requirements
 - [Architecture](docs/architecture/README.md) — target system design
@@ -36,6 +39,18 @@ Migrations (needs a `DATABASE_URL` pointing at a pgvector instance, e.g.
 ```bash
 uv run alembic upgrade head
 uv run alembic downgrade base   # roll back to an empty database, to check downgrade()
+```
+
+Most tests (ACL, repositories, search, bot business logic) are integration
+tests against real Postgres+pgvector and Redis, not mocks:
+
+```bash
+docker run -d --name notes-pg -e POSTGRES_PASSWORD=test -p 5432:5432 pgvector/pgvector:pg16
+docker run -d --name notes-redis -p 6379:6379 redis:7-alpine
+DATABASE_URL=postgresql+psycopg://postgres:test@localhost:5432/postgres \
+  REDIS_URL=redis://localhost:6379/3 \
+  TELEGRAM_BOT_TOKEN=x EMBEDDINGS_URL=http://localhost:9 EMBEDDING_MODEL_NAME=x \
+  uv run pytest -q
 ```
 
 Required environment variables (see `notes_bot/config.py` and
