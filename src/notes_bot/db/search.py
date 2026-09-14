@@ -8,12 +8,14 @@ ON note_id, still ordered by distance) -> page ordered by distance.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from notes_bot.db.models import Note, NoteChunk
+from notes_bot.metrics import SEARCH_DURATION_SECONDS
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,34 @@ async def search_notes(
     caller drops the extra row before rendering) — see 04-search.md,
     "Пагинация".
     """
+    started = time.perf_counter()
+    try:
+        return await _search_notes(
+            session,
+            query_vector=query_vector,
+            acl_predicate=acl_predicate,
+            active_model=active_model,
+            candidate_k=candidate_k,
+            limit=limit,
+            offset=offset,
+        )
+    finally:
+        # 06-deployment.md, "Латентность /search p50/p95" — timed around
+        # the whole call, success or failure, since a slow failure is still
+        # a latency problem worth seeing on the graph.
+        SEARCH_DURATION_SECONDS.observe(time.perf_counter() - started)
+
+
+async def _search_notes(
+    session: AsyncSession,
+    *,
+    query_vector: list[float],
+    acl_predicate: ColumnElement[bool],
+    active_model: str,
+    candidate_k: int,
+    limit: int,
+    offset: int,
+) -> list[SearchHit]:
     distance = NoteChunk.embedding.cosine_distance(query_vector)
 
     ann = (

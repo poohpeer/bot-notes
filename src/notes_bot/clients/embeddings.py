@@ -7,7 +7,11 @@ contract, batching limits, or the service's error codes directly.
 
 from __future__ import annotations
 
+import time
+
 import httpx
+
+from notes_bot.metrics import EMBED_DURATION_SECONDS
 
 
 class EmbeddingServiceError(RuntimeError):
@@ -67,22 +71,30 @@ class HttpEmbeddingClient:
         return vectors[0]
 
     async def _embed(self, texts: list[str], kind: str) -> list[list[float]]:
-        async with httpx.AsyncClient(timeout=self._timeout, transport=self._transport) as client:
-            try:
-                response = await client.post(
-                    f"{self._base_url}/embed", json={"texts": texts, "kind": kind}
-                )
-            except httpx.HTTPError as exc:
-                # Connection refused, DNS failure, timeout — treat like a
-                # transient service error rather than a distinct exception
-                # type every caller has to learn separately.
-                raise EmbeddingServiceError(503, str(exc)) from exc
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, transport=self._transport
+            ) as client:
+                try:
+                    response = await client.post(
+                        f"{self._base_url}/embed", json={"texts": texts, "kind": kind}
+                    )
+                except httpx.HTTPError as exc:
+                    # Connection refused, DNS failure, timeout — treat like a
+                    # transient service error rather than a distinct exception
+                    # type every caller has to learn separately.
+                    raise EmbeddingServiceError(503, str(exc)) from exc
 
-        if response.status_code != 200:
-            detail = _error_detail(response)
-            raise EmbeddingServiceError(response.status_code, detail)
+            if response.status_code != 200:
+                detail = _error_detail(response)
+                raise EmbeddingServiceError(response.status_code, detail)
 
-        return response.json()["vectors"]
+            return response.json()["vectors"]
+        finally:
+            # 06-deployment.md, "Латентность /embed" — узкое место общее
+            # для приёма и поиска.
+            EMBED_DURATION_SECONDS.labels(kind=kind).observe(time.perf_counter() - started)
 
 
 def _error_detail(response: httpx.Response) -> str:

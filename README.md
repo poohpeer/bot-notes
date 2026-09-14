@@ -49,8 +49,22 @@ from a Telegram Desktop export, classifies each message the same way a live
 on imported notes is always NULL — export ids don't match what the bot will
 see live for the same chat).
 
-M9 (operations/observability) is the next stage — see
-`docs/architecture/08-roadmap.md`.
+M9 (operations/observability): Prometheus metrics from the `06-deployment.md`
+table (`notes_bot/metrics.py`) — `fast`/`heavy`/`llm` queue length, processing
+time and failure rate by `source_type`, `/search` and `/embed` latency,
+extractor error rate. `notes-bot` serves `/metrics` on `HEALTH_PORT`,
+`notes-worker-*` on a separate `METRICS_PORT` (its own HTTP server, since the
+worker is synchronous). Logs actually became JSON — `logging_setup.py` used
+to configure structlog, but no call in the codebase went through
+`structlog.get_logger()`, so plain text was rendered instead; fixed via
+`structlog.stdlib.ProcessorFormatter` on top of standard `logging`. An
+example alert on the extractor error rate is in `06-deployment.md`.
+
+**Not done** (needs real operation, a synthetic run doesn't substitute for
+it): reviewing pod resources against a week of real data, a load test
+measuring p95, reviewing the search query plan at real data volume. The
+M0-M9 roadmap is now fully implemented at the code level; these three items
+are, by definition, not code but production data.
 
 The embedding model choice is still open — needs a benchmark on real notes,
 see `services/embeddings/README.md`.

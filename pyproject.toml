@@ -15,6 +15,7 @@ dependencies = [
     "trafilatura>=1.12",
     "pydantic-settings>=2.4",
     "structlog>=24.1",
+    "prometheus-client>=0.20",
     # Metadata-only YouTube extraction runs on the `fast` queue (see
     # 03-ingest.md's extractor table), which uses this plain `app` image,
     # not app-heavy — corrects 06-deployment.md's image table, which listed

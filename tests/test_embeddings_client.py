@@ -4,8 +4,14 @@ import json
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY
 
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
+
+
+def _observed(kind: str) -> float:
+    return REGISTRY.get_sample_value("notes_embed_duration_seconds_count", {"kind": kind}) or 0.0
+
 
 # asyncio_mode = "auto" (pyproject.toml) picks up async def tests on its
 # own — no per-test marker needed, unlike test_acl.py's `pytestmark` which
@@ -91,3 +97,24 @@ async def test_non_json_error_body_falls_back_to_raw_text():
 
     with pytest.raises(EmbeddingServiceError, match="not json"):
         await _client(handler).embed_query("q")
+
+
+async def test_records_duration_by_kind_on_success_and_failure():
+    """06-deployment.md, "Латентность /embed" — recorded for both a
+    successful call and one that raises, see clients/embeddings.py's
+    `_embed` finally block."""
+    passage_before = _observed("passage")
+    query_before = _observed("query")
+
+    def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"vectors": [[0.1]]})
+
+    await _client(ok).embed_passages(["a"])
+    assert _observed("passage") == passage_before + 1
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="boom")
+
+    with pytest.raises(EmbeddingServiceError):
+        await _client(fail).embed_query("q")
+    assert _observed("query") == query_before + 1

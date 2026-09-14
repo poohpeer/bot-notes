@@ -15,11 +15,13 @@ from __future__ import annotations
 import logging
 import sys
 
+from prometheus_client import start_http_server
 from redis import Redis
 from rq import Worker
 
 from notes_bot.config import get_settings
 from notes_bot.logging_setup import configure_logging
+from notes_bot.metrics import register_queue_length_collector
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +34,12 @@ def run() -> None:
     log.info("notes-worker starting, queues=%s", queues)
 
     redis_conn = Redis.from_url(settings.redis_url)
+    register_queue_length_collector(redis_conn)
+    # Worker.work() blocks synchronously (no aiohttp loop here, unlike
+    # cli/bot.py) — start_http_server runs its own background thread, see
+    # docs/architecture/06-deployment.md, "Наблюдаемость".
+    start_http_server(settings.metrics_port)
+
     worker = Worker(queues, connection=redis_conn)
     worker.work()
 

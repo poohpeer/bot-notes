@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -94,6 +95,12 @@ async def factory(db_engine):
 async def test_process_note_embeds_and_marks_done(factory):
     note_id = await factory.insert_pending_text_note(text="one two three four five")
     client = FakeEmbeddingClient()
+    duration_before = (
+        REGISTRY.get_sample_value(
+            "notes_process_note_duration_seconds_count", {"source_type": "text"}
+        )
+        or 0.0
+    )
 
     await process_note_async(note_id, session_factory=factory, embedding_client=client)
 
@@ -107,11 +114,22 @@ async def test_process_note_embeds_and_marks_done(factory):
         )
         assert len(chunks) == 1
         assert chunks[0].embedding_model == "fake-model"
+    # 06-deployment.md, "Время обработки по source_type" — recorded on
+    # success too, not only on the failure paths below.
+    assert (
+        REGISTRY.get_sample_value(
+            "notes_process_note_duration_seconds_count", {"source_type": "text"}
+        )
+        == duration_before + 1
+    )
 
 
 async def test_process_note_marks_failed_on_embedding_error(factory):
     note_id = await factory.insert_pending_text_note()
     client = FakeEmbeddingClient(fail=EmbeddingServiceError(503, "model not loaded"))
+    failed_before = (
+        REGISTRY.get_sample_value("notes_status_failed_total", {"source_type": "text"}) or 0.0
+    )
 
     await process_note_async(note_id, session_factory=factory, embedding_client=client)
 
@@ -120,6 +138,10 @@ async def test_process_note_marks_failed_on_embedding_error(factory):
         assert note.status == "failed"
         assert "503" in note.error
         assert note.attempts == 1
+    assert (
+        REGISTRY.get_sample_value("notes_status_failed_total", {"source_type": "text"})
+        == failed_before + 1
+    )
 
 
 async def test_process_note_marks_failed_on_empty_text(factory):

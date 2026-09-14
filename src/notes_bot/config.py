@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     gc_retention_days: int = Field(default=30, alias="GC_RETENTION_DAYS")
     gc_stuck_processing_minutes: int = Field(default=30, alias="GC_STUCK_PROCESSING_MINUTES")
     gc_batch_size: int = Field(default=500, alias="GC_BATCH_SIZE")
+    # Worker processes' Prometheus port — see 06-deployment.md, "Наблюдаемость".
+    # notes-bot itself serves /metrics on HEALTH_PORT instead (see health.py).
+    metrics_port: int = Field(default=9090, alias="METRICS_PORT")
 
 
 @lru_cache(maxsize=1)

@@ -15,6 +15,10 @@ spec:
     metadata:
       labels:
         app: notes-worker-heavy
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
     spec:
       # RQ lets an in-flight job finish on SIGTERM; a long transcription
       # must not be cut off on every deploy. The job is idempotent
@@ -27,6 +31,9 @@ spec:
         - name: worker
           image: ghcr.io/poohpeer/bot-notes-app-heavy:latest
           command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.worker", "heavy"]
+          ports:
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: notes-bot-config

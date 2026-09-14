@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import true
 
 from notes_bot.db.models import Note, NoteChunk
@@ -197,3 +198,19 @@ async def test_acl_predicate_is_applied(db_session):
         offset=0,
     )
     assert [h.note_id for h in hits] == [mine.id]
+
+
+async def test_records_search_duration(db_session):
+    """06-deployment.md, "Латентность /search p50/p95"."""
+    before = REGISTRY.get_sample_value("notes_search_duration_seconds_count") or 0.0
+
+    await search_notes(
+        db_session,
+        query_vector=QUERY,
+        acl_predicate=EVERYTHING_VISIBLE,
+        active_model=MODEL,
+        candidate_k=200,
+        limit=10,
+        offset=0,
+    )
+    assert REGISTRY.get_sample_value("notes_search_duration_seconds_count") == before + 1

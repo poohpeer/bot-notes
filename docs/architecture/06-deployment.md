@@ -123,24 +123,58 @@ Long polling через `getUpdates` не допускает двух однов
 
 ## Наблюдаемость
 
-Логи - structlog в JSON, обязательные поля: `note_id`, `user_id`, `chat_id`,
-`job_id`, `source_type`, `duration_ms`. Токен бота, содержимое заметок и
-тексты запросов в логи не пишутся - это персональные данные.
+Логи - structlog в JSON (`logging_setup.py`, `structlog.stdlib.ProcessorFormatter`
+поверх обычных `logging.getLogger(__name__)` вызовов - код нигде не зовёт
+`structlog.get_logger()` напрямую). Обязательные поля, где применимо:
+`note_id`, `user_id`, `chat_id`, `job_id`, `source_type`, `duration_ms` -
+попадают в JSON как отдельные ключи только через `extra={...}` вызова
+логирования (`ExtraAdder`), не просто упоминанием в тексте сообщения; пока
+это сделано не для каждого места логирования в кодовой базе. Токен бота,
+содержимое заметок и тексты запросов в логи не пишутся - это персональные
+данные.
 
-Метрики, которые понадобятся с первого дня:
+Метрики, которые понадобятся с первого дня (реализовано в M9,
+`notes_bot/metrics.py`, Prometheus text format):
 
-| Метрика | Зачем |
-|---|---|
-| Длина очередей `fast`, `heavy`, `llm` | Раньше всего показывает, что воркер не справляется |
-| Время обработки по `source_type` | Отдельно покажет реальную стоимость Whisper |
-| Доля `status='failed'` и `enrich_status='failed'` | Здоровье экстракторов и ai-proxy |
-| Латентность `/search` p50 / p95 | Дизайн-док требует, чтобы обычный поиск был быстрым |
-| Латентность `/embed` | Узкое место общее для приёма и поиска |
-| Доля ошибок yt-dlp по источникам | Сигнал, что Instagram или YouTube начали блокировать |
+| Метрика | Зачем | Имя в Prometheus |
+|---|---|---|
+| Длина очередей `fast`, `heavy`, `llm` | Раньше всего показывает, что воркер не справляется | `notes_queue_length{queue=...}` |
+| Время обработки по `source_type` | Отдельно покажет реальную стоимость Whisper | `notes_process_note_duration_seconds{source_type=...}` |
+| Доля `status='failed'` и `enrich_status='failed'` | Здоровье экстракторов и ai-proxy | `notes_status_failed_total{source_type=...}`, `notes_enrich_status_failed_total` |
+| Латентность `/search` p50 / p95 | Дизайн-док требует, чтобы обычный поиск был быстрым | `notes_search_duration_seconds` |
+| Латентность `/embed` | Узкое место общее для приёма и поиска | `notes_embed_duration_seconds{kind=...}` |
+| Доля ошибок yt-dlp по источникам | Сигнал, что Instagram или YouTube начали блокировать | `notes_extractor_failures_total{source_type=...}` |
+
+`notes-bot` отдаёт `/metrics` на `HEALTH_PORT` (том же порту, что и
+health-пробы); `notes-worker-fast`/`-heavy` - на отдельном `METRICS_PORT`
+(`9090` по умолчанию), т.к. воркер синхронный и не поднимает свой aiohttp-
+сервер. `notes-gc` метрик не отдаёт - короткий батч-джоб, для Prometheus
+pull-модели не подходит без Pushgateway, которого пока нет.
 
 Последняя метрика заслуживает алерта: блокировки внешних площадок - самый
 вероятный вид поломки в этой системе, и узнать о ней лучше из графика, чем
-из жалобы пользователя.
+из жалобы пользователя. Ориентировочное правило (синтаксис Prometheus
+alerting rule, сам Prometheus Operator/CRD в этот репозиторий не входит -
+эксплуатирующая команда подключает его по месту):
+
+```yaml
+- alert: NotesExtractorFailureRateHigh
+  expr: |
+    sum by (source_type) (rate(notes_extractor_failures_total[15m]))
+      / sum by (source_type) (rate(notes_process_note_duration_seconds_count[15m]))
+      > 0.2
+  for: 30m
+  labels:
+    severity: warning
+  annotations:
+    summary: ">20% экстракций для {{ $labels.source_type }} деградируют за 15 минут"
+```
+
+Не сделано в M9, требует реальной эксплуатации (см. `08-roadmap.md`):
+ревизия ресурсов подов по фактическим данным за неделю, прогон нагрузки с
+измерением p95, ревизия плана запроса поиска на реальном объёме данных - ни
+для одного из этих пунктов синтетический прогон против пустой локальной
+базы не заменяет самих чисел с прода.
 
 ## Резервное копирование
 
