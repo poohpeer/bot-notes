@@ -75,7 +75,7 @@ def render_places(structured: dict) -> list[str]:
         name = place.get("name")
         if not isinstance(name, str) or not name.strip():
             continue
-        hint = place.get("address_hint")
+        hint = place.get("location_hint")
         query = f"{name} {hint}" if isinstance(hint, str) and hint.strip() else name
         lines.append(f"📍 {name} — {_google_maps_search_url(query)}")
     return lines

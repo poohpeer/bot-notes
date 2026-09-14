@@ -171,7 +171,7 @@ async def test_sources_include_extracted_places_as_maps_links(factory):
         title="Тбилиси видео",
         raw_text="обзор мест",
         source_type="youtube",
-        structured={"places": [{"name": "Кахелеби", "address_hint": "Кахетинское шоссе"}]},
+        structured={"places": [{"name": "Кахелеби", "location_hint": "Кахетинское шоссе"}]},
     )
     llm = ScriptedLLMClient(text="Вот что нашлось.")
     sender = FakeSender()

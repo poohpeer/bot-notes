@@ -55,7 +55,7 @@ _PLACES_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "name": {"type": ["string", "null"]},
-                    "address_hint": {"type": ["string", "null"]},
+                    "location_hint": {"type": ["string", "null"]},
                 },
             },
         }
@@ -127,7 +127,7 @@ async def generate_place(llm: LLMClient, text: str, *, timeout_s: float) -> dict
 
 async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> list[dict]:
     """For `youtube`/`instagram` notes: places mentioned in a video's
-    caption/transcript, each `{"name": ..., "address_hint": ...}` — see
+    caption/transcript, each `{"name": ..., "location_hint": ...}` — see
     04-search.md/03-ingest.md, "Места из видео". Unlike `generate_place`,
     a video can plausibly mention several places, not describe exactly one."""
     result = await llm.complete(
@@ -149,9 +149,9 @@ async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> lis
         if not isinstance(name, str) or not name.strip():
             continue
         cleaned_place = {"name": name.strip()}
-        hint = place.get("address_hint")
+        hint = place.get("location_hint")
         if isinstance(hint, str) and hint.strip():
-            cleaned_place["address_hint"] = hint.strip()
+            cleaned_place["location_hint"] = hint.strip()
         cleaned.append(cleaned_place)
     return cleaned
 

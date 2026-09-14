@@ -83,18 +83,18 @@ async def test_generate_places_keeps_only_entries_with_a_name():
     llm = ScriptedLLMClient(
         {
             "places": [
-                {"name": "Кахелеби", "address_hint": "Кахетинское шоссе"},
-                {"name": None, "address_hint": "no name, dropped"},
-                {"name": "  ", "address_hint": "blank name, dropped"},
+                {"name": "Кахелеби", "location_hint": "Кахетинское шоссе"},
+                {"name": None, "location_hint": "no name, dropped"},
+                {"name": "  ", "location_hint": "blank name, dropped"},
             ]
         }
     )
     places = await generate_places(llm, "text", timeout_s=10)
-    assert places == [{"name": "Кахелеби", "address_hint": "Кахетинское шоссе"}]
+    assert places == [{"name": "Кахелеби", "location_hint": "Кахетинское шоссе"}]
 
 
-async def test_generate_places_strips_empty_address_hint():
-    llm = ScriptedLLMClient({"places": [{"name": "Ботанический сад", "address_hint": "  "}]})
+async def test_generate_places_strips_empty_location_hint():
+    llm = ScriptedLLMClient({"places": [{"name": "Ботанический сад", "location_hint": "  "}]})
     places = await generate_places(llm, "text", timeout_s=10)
     assert places == [{"name": "Ботанический сад"}]
 

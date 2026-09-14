@@ -105,7 +105,7 @@ def test_card_for_a_titled_link_note_still_shows_the_url_once():
 
 
 def test_card_includes_places_as_maps_links():
-    structured = {"places": [{"name": "Кахелеби", "address_hint": "Кахетинское шоссе"}]}
+    structured = {"places": [{"name": "Кахелеби", "location_hint": "Кахетинское шоссе"}]}
     card = render_search_card(_hit(title="x", structured=structured))
     assert "📍 Кахелеби — https://www.google.com/maps/search/?api=1&query=" in card
     assert "Кахелеби Кахетинское шоссе" in unquote(card.split("query=")[1])
@@ -117,11 +117,11 @@ def test_card_omits_places_line_when_none():
 
 
 def test_render_places_skips_entries_with_no_name():
-    lines = render_places({"places": [{"address_hint": "no name here"}]})
+    lines = render_places({"places": [{"location_hint": "no name here"}]})
     assert lines == []
 
 
-def test_render_places_works_without_address_hint():
+def test_render_places_works_without_location_hint():
     lines = render_places({"places": [{"name": "Ботанический сад"}]})
     assert len(lines) == 1
     assert lines[0].startswith("📍 Ботанический сад — ")
