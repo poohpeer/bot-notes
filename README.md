@@ -16,12 +16,12 @@ blocking a plain text save. A failed extraction doesn't fail the note — the
 raw text is indexed instead (degradation, see `03-ingest.md`).
 
 After saving, a note is asynchronously enriched via ai-proxy (title, tags,
-summary, structured place fields for maps, duplicate detection) — but
-`LLM_ENABLED=false` by default. The codex sandbox fix this was blocked on
-(ADR-14, risk R5 in `07-decisions.md`) has shipped — `ai-proxy#15` merged
-and deployed — so flipping the flag to `true` in production is now a
-product/cost decision, not a security blocker. Without it, everything works
-without titles and tags — `NullLLMClient` is substituted automatically.
+summary, structured place fields for maps, duplicate detection), and
+`/smart_search` synthesizes a sourced answer the same way. `LLM_ENABLED=true`
+in `deploy/k8s/configmap.yaml` — the codex sandbox fix this was blocked on
+(ADR-14, risk R5 in `07-decisions.md`) has shipped (`ai-proxy#15`, merged and
+deployed). With it disabled, everything still works without titles and
+tags — `NullLLMClient` is substituted automatically.
 
 M6 (groups and note management): the bot works in group "rooms" — saves
 mentions and replies to itself (`/capture_all` turns on "all" mode, warning
