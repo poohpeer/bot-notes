@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import ColumnElement, case, delete, insert, select, text, update
+from sqlalchemy import ColumnElement, case, delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -202,6 +202,88 @@ class NoteRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_own(self, user_id: int, *, limit: int, offset: int) -> list[Note]:
+        """`/list` — see 04-search.md: "Свои заметки по дате, без
+        векторов". Plain SQL pagination, not the search cache: there is no
+        ANN re-ranking to go stale between pages here."""
+        result = await self._session.execute(
+            select(Note)
+            .where(Note.user_id == user_id, Note.deleted_at.is_(None))
+            .order_by(Note.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars())
+
+    async def list_own_deleted(self, user_id: int, *, limit: int, offset: int) -> list[Note]:
+        result = await self._session.execute(
+            select(Note)
+            .where(Note.user_id == user_id, Note.deleted_at.is_not(None))
+            .order_by(Note.deleted_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars())
+
+    async def soft_delete(self, note_id: int, user_id: int) -> bool:
+        """`user_id = :me` in the WHERE clause of the mutation itself, per
+        04-search.md, "Удаление и восстановление" — check and change are
+        one operation, no race between them. Returns whether a row was
+        actually touched (False: wrong owner, already deleted, or gone)."""
+        result = await self._session.execute(
+            update(Note)
+            .where(Note.id == note_id, Note.user_id == user_id, Note.deleted_at.is_(None))
+            .values(deleted_at=func.now())
+        )
+        return result.rowcount > 0
+
+    async def restore(self, note_id: int, user_id: int) -> bool:
+        result = await self._session.execute(
+            update(Note)
+            .where(Note.id == note_id, Note.user_id == user_id, Note.deleted_at.is_not(None))
+            .values(deleted_at=None)
+        )
+        return result.rowcount > 0
+
+    async def edit_text(self, note_id: int, user_id: int, new_text: str) -> bool:
+        """Only for `source_type='text'` — a voice transcript or a page's
+        extracted_text isn't user-authored text to begin with (03-ingest.md,
+        "Редактирование"). Resets to `status='pending'`: the caller must
+        re-enqueue process_note, since the old chunks/vectors no longer
+        match `raw_text`."""
+        result = await self._session.execute(
+            update(Note)
+            .where(
+                Note.id == note_id,
+                Note.user_id == user_id,
+                Note.source_type == "text",
+            )
+            .values(raw_text=new_text, status="pending")
+        )
+        return result.rowcount > 0
+
+    async def edit_text_by_message(
+        self, *, chat_id: int, tg_message_id: int, user_id: int, new_text: str
+    ) -> int | None:
+        """Same as `edit_text`, but for the edited_message path: the user
+        edited their original Telegram message rather than issuing an
+        explicit edit command, so all the bot has to go on is
+        (chat_id, tg_message_id) — the same pair ADR-8's idempotent insert
+        keys on. Returns the note_id on success, so the caller can
+        re-enqueue process_note without a second lookup."""
+        result = await self._session.execute(
+            update(Note)
+            .where(
+                Note.chat_id == chat_id,
+                Note.tg_message_id == tg_message_id,
+                Note.user_id == user_id,
+                Note.source_type == "text",
+            )
+            .values(raw_text=new_text, status="pending")
+            .returning(Note.id)
+        )
+        return result.scalar_one_or_none()
+
 
 class ChunkRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -296,3 +378,13 @@ class ChatSettingsRepository:
         )
         row = result.scalar_one_or_none()
         return row or "mentions_and_replies"
+
+    async def set_capture_mode(self, chat_id: int, mode: str, *, title: str | None = None) -> None:
+        stmt = (
+            pg_insert(ChatSettings)
+            .values(chat_id=chat_id, capture_mode=mode, title=title)
+            .on_conflict_do_update(
+                index_elements=["chat_id"], set_={"capture_mode": mode, "updated_at": func.now()}
+            )
+        )
+        await self._session.execute(stmt)

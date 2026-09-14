@@ -1,9 +1,20 @@
 from notes_bot.bot.render import (
     RenderableHit,
+    render_capture_mode_changed,
+    render_delete_confirmation_prompt,
+    render_delete_refused,
+    render_edit_refused,
+    render_edit_saved,
+    render_group_note_saved,
+    render_group_welcome,
+    render_list_empty,
     render_no_more_results,
+    render_note_deleted,
+    render_note_restored,
     render_privacy_toggle_confirmation,
     render_search_card,
     render_search_expired,
+    render_trash_empty,
 )
 
 
@@ -73,3 +84,38 @@ def test_no_more_results_message():
 
 def test_search_expired_message():
     assert render_search_expired()
+
+
+def test_capture_mode_all_mentions_botfather_privacy():
+    text = render_capture_mode_changed("all")
+    assert "privacy" in text.lower() or "BotFather" in text
+
+
+def test_capture_mode_mentions_and_replies_says_so():
+    text = render_capture_mode_changed("mentions_and_replies")
+    assert "упоминани" in text.lower()
+
+
+def test_group_welcome_message():
+    assert render_group_welcome()
+
+
+def test_group_note_saved_message():
+    assert render_group_note_saved()
+
+
+def test_list_and_trash_empty_messages():
+    assert render_list_empty()
+    assert render_trash_empty()
+
+
+def test_delete_flow_messages():
+    assert render_delete_confirmation_prompt()
+    assert render_note_deleted()
+    assert render_delete_refused()
+    assert render_note_restored()
+
+
+def test_edit_flow_messages():
+    assert render_edit_saved()
+    assert render_edit_refused()

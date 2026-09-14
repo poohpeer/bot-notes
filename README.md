@@ -23,8 +23,14 @@ the codex sandbox fix in `poohpeer/ai-proxy` ships (ADR-14, risk R5 in
 everything works without titles and tags — `NullLLMClient` is substituted
 automatically.
 
-Groups and `/smart_search` are the next stages — see
-`docs/architecture/08-roadmap.md`.
+M6 (groups and note management): the bot works in group "rooms" — saves
+mentions and replies to itself (`/capture_all` turns on "all" mode, warning
+about the bot's privacy mode in BotFather), greets on being added to a
+group. `/list` and `/trash` (private chat only — private notes are never
+broadcast into a group), delete with confirmation, restore. Editing a text
+note works through a regular Telegram message edit.
+
+`/smart_search` is the next stage — see `docs/architecture/08-roadmap.md`.
 
 The embedding model choice is still open — needs a benchmark on real notes,
 see `services/embeddings/README.md`.

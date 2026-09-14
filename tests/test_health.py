@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from notes_bot.health import create_health_app, mark_ready_after_get_me
+from notes_bot.health import create_health_app, mark_ready, mark_ready_after_get_me
 
 
 class FakeBot:
@@ -49,3 +49,13 @@ async def test_mark_ready_leaves_app_not_ready_if_get_me_fails():
     async with TestClient(TestServer(app)) as client:
         response = await client.get("/readyz")
         assert response.status == 503
+
+
+async def test_mark_ready_directly_without_a_fresh_get_me_call():
+    """cli/bot.py's path: it already has its own getMe result (for
+    bot_username) and shouldn't need a second call just for readiness."""
+    app = create_health_app(FakeBot())
+    mark_ready(app)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/readyz")
+        assert response.status == 200
