@@ -29,6 +29,13 @@ data:
   GC_RETENTION_DAYS: "30"
   GC_STUCK_PROCESSING_MINUTES: "30"
   GC_BATCH_SIZE: "500"
+  # A note reclaimed this many times without reaching 'done' is abandoned
+  # instead — see Settings.gc_max_attempts.
+  GC_MAX_ATTEMPTS: "3"
+  # `heavy`'s own RQ job_timeout — see Settings.heavy_job_timeout_s for why
+  # RQ's 180s default is too tight for it.
+  HEAVY_JOB_TIMEOUT_S: "900"
+  ALERTS_MIN_INTERVAL_MINUTES: "5"
   # notes-worker-fast/-heavy's Prometheus port — notes-bot itself serves
   # /metrics on HEALTH_PORT instead, see health.py.
   METRICS_PORT: "9090"

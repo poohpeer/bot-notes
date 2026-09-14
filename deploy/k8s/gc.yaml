@@ -1,6 +1,12 @@
-# notes-gc — daily hard-delete + stuck-processing reclaim, see
-# docs/architecture/08-roadmap.md M8 and 03-ingest.md. Runs the `notes-app`
-# image (no ffmpeg/whisper needed) via `notes_bot.cli.gc`.
+# notes-gc — daily hard-delete only, see docs/architecture/08-roadmap.md M8
+# and 03-ingest.md. Runs the `notes-app` image (no ffmpeg/whisper needed) via
+# `notes_bot.cli.gc --job hard-delete`.
+#
+# The stuck-processing reclaim used to run here too, once a day — too
+# infrequent to be the recovery path for a worker that just died (see
+# gc-reclaim.yaml, which now owns that job on its own five-minute schedule).
+# Hard-delete stays daily: it is not time-sensitive, and splitting it out
+# keeps the frequent job cheap and fast.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -10,9 +16,9 @@ spec:
   concurrencyPolicy: Forbid
   jobTemplate:
     spec:
-      # Both phases page through their work in bounded batches (GC_BATCH_SIZE)
-      # rather than one long transaction — see 07-decisions.md R7 — so a
-      # generous but still bounded deadline is enough even on a large table.
+      # Pages through its work in bounded batches (GC_BATCH_SIZE) rather
+      # than one long transaction — see 07-decisions.md R7 — so a generous
+      # but still bounded deadline is enough even on a large table.
       activeDeadlineSeconds: 1800
       template:
         spec:
@@ -22,7 +28,7 @@ spec:
           containers:
             - name: gc
               image: ghcr.io/poohpeer/bot-notes-app:latest
-              command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.gc"]
+              command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.gc", "--job", "hard-delete"]
               envFrom:
                 - configMapRef:
                     name: notes-bot-config

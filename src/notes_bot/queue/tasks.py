@@ -29,6 +29,7 @@ from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from notes_bot.bot.render import render_places, render_smart_answer_failed
+from notes_bot.clients.alerts import AlertNotifier, NullNotifier, build_notifier
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
 from notes_bot.clients.llm import LLMClient, LLMServiceError, NullLLMClient, ProxyAILLMClient
 from notes_bot.clients.prompts import load_prompt
@@ -69,6 +70,7 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker | None = None
 _extractors: dict[str, Extractor] | None = None
 _llm_queue: Queue | None = None
+_alerts: AlertNotifier | None = None
 
 
 def _get_session_factory(settings: Settings) -> async_sessionmaker:
@@ -84,6 +86,17 @@ def _get_llm_queue(settings: Settings) -> Queue:
     if _llm_queue is None:
         _llm_queue = Queue("llm", connection=Redis.from_url(settings.redis_url))
     return _llm_queue
+
+
+def _get_alerts(settings: Settings) -> AlertNotifier:
+    global _alerts
+    if _alerts is None:
+        _alerts = build_notifier(
+            settings.alerts_telegram_bot_token,
+            settings.alerts_telegram_chat_id,
+            min_interval_minutes=settings.alerts_min_interval_minutes,
+        )
+    return _alerts
 
 
 def _get_extractors(settings: Settings) -> dict[str, Extractor]:
@@ -155,12 +168,14 @@ async def process_note_async(
     embedding_client: HttpEmbeddingClient,
     extractors: dict[str, Extractor] | None = None,
     llm_queue: Queue | None = None,
+    alerts: AlertNotifier | None = None,
 ) -> None:
     # Empty, not a module-level default: a 'text' note never consults this
     # (see _extract_and_get_index_text), and every other source_type is
     # expected to pass its own — process_note() below always does, built
     # from settings via _get_extractors().
     extractors = extractors if extractors is not None else {}
+    alerts = alerts if alerts is not None else NullNotifier()
     async with session_factory() as session:
         note_repo = NoteRepository(session)
         note = await note_repo.get(note_id)
@@ -186,9 +201,10 @@ async def process_note_async(
         note = await note_repo.get(note_id)
         assert note is not None  # just fetched above; nothing else deletes notes
         # Captured before any rollback below expires the ORM object —
-        # reading note.source_type afterward would trigger an implicit
-        # (and here, unawaited) lazy-load.
+        # reading note.source_type/source_url afterward would trigger an
+        # implicit (and here, unawaited) lazy-load.
         source_type = note.source_type
+        source_url = note.source_url
 
         started = time.perf_counter()
         try:
@@ -229,6 +245,9 @@ async def process_note_async(
                 exc.retryable,
                 exc,
             )
+            await alerts.failed(
+                note_id=note_id, source_type=source_type, source_url=source_url, error=str(exc)
+            )
         except Exception as exc:  # noqa: BLE001 — logged and recorded, not swallowed
             await session.rollback()
             async with session_factory() as failure_session:
@@ -236,6 +255,9 @@ async def process_note_async(
                 await failure_session.commit()
             NOTES_STATUS_FAILED_TOTAL.labels(source_type=source_type).inc()
             log.exception("process_note: note_id=%s failed unexpectedly", note_id)
+            await alerts.failed(
+                note_id=note_id, source_type=source_type, source_url=source_url, error=str(exc)
+            )
         finally:
             # 06-deployment.md, "Время обработки по source_type" —
             # separately shows the real cost of Whisper.
@@ -260,6 +282,7 @@ def process_note(note_id: int) -> None:
             embedding_client=embedding_client,
             extractors=_get_extractors(settings),
             llm_queue=_get_llm_queue(settings),
+            alerts=_get_alerts(settings),
         )
     )
 

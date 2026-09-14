@@ -83,10 +83,13 @@ async def save_note(
         # ADR-8: a retried Telegram delivery for a message already saved.
         return SaveNoteResult(created=False, note_id=None, visibility=None)
 
-    target_queue = (
-        deps.heavy_queue if classification.source_type in _HEAVY_SOURCE_TYPES else deps.fast_queue
+    is_heavy = classification.source_type in _HEAVY_SOURCE_TYPES
+    target_queue = deps.heavy_queue if is_heavy else deps.fast_queue
+    enqueue_process_note(
+        target_queue,
+        note.id,
+        job_timeout=deps.settings.heavy_job_timeout_s if is_heavy else None,
     )
-    enqueue_process_note(target_queue, note.id)
 
     return SaveNoteResult(
         created=True,
@@ -133,7 +136,7 @@ async def save_voice_note(
     if note is None:
         return SaveNoteResult(created=False, note_id=None, visibility=None)
 
-    enqueue_process_note(deps.heavy_queue, note.id)
+    enqueue_process_note(deps.heavy_queue, note.id, job_timeout=deps.settings.heavy_job_timeout_s)
     return SaveNoteResult(created=True, note_id=note.id, visibility=visibility, source_type="voice")
 
 

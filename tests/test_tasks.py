@@ -144,6 +144,48 @@ async def test_process_note_marks_failed_on_embedding_error(factory):
     )
 
 
+class FakeAlerts:
+    def __init__(self) -> None:
+        self.failed_calls: list[dict] = []
+
+    async def reclaimed(self, **kw):
+        pass
+
+    async def abandoned(self, **kw):
+        pass
+
+    async def failed(self, **kw):
+        self.failed_calls.append(kw)
+
+
+async def test_process_note_alerts_on_a_real_exception(factory):
+    """Unlike a stuck/reclaimed note (nothing to say why), a caught
+    exception has a real reason — the alert should carry it."""
+    note_id = await factory.insert_pending_text_note()
+    client = FakeEmbeddingClient(fail=EmbeddingServiceError(503, "model not loaded"))
+    alerts = FakeAlerts()
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=client, alerts=alerts
+    )
+
+    [call] = alerts.failed_calls
+    assert call["note_id"] == note_id
+    assert call["source_type"] == "text"
+    assert "503" in call["error"]
+
+
+async def test_process_note_never_alerts_on_success(factory):
+    note_id = await factory.insert_pending_text_note()
+    alerts = FakeAlerts()
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=FakeEmbeddingClient(), alerts=alerts
+    )
+
+    assert alerts.failed_calls == []
+
+
 async def test_process_note_marks_failed_on_empty_text(factory):
     note_id = await factory.insert_pending_text_note(text="   ")
     client = FakeEmbeddingClient()

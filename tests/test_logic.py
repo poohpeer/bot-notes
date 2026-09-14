@@ -49,9 +49,11 @@ class FakeEmbeddingClient:
 class FakeQueue:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
+        self.kwargs: list[dict] = []
 
     def enqueue(self, func, *args, job_id=None, **kw):
         self.calls.append((func, args, job_id))
+        self.kwargs.append(kw)
 
 
 def _vec(x: float, y: float) -> list[float]:
@@ -364,6 +366,9 @@ async def test_save_note_routes_an_instagram_link_to_the_heavy_queue(deps):
     assert result.created is True
     assert deps.fast_queue.calls == []
     assert len(deps.heavy_queue.calls) == 1
+    # Settings.heavy_job_timeout_s, not RQ's own 180s default — see its
+    # docstring for why that default is too tight for this queue.
+    assert deps.heavy_queue.kwargs[0]["job_timeout"] == deps.settings.heavy_job_timeout_s
 
 
 async def test_save_voice_note_uses_file_id_as_source_url_and_caption_as_raw_text(deps, db_engine):
@@ -399,6 +404,22 @@ async def test_save_voice_note_routes_to_the_heavy_queue(deps):
     assert result.created is True
     assert deps.fast_queue.calls == []
     assert len(deps.heavy_queue.calls) == 1
+    assert deps.heavy_queue.kwargs[0]["job_timeout"] == deps.settings.heavy_job_timeout_s
+
+
+async def test_save_note_to_the_fast_queue_uses_no_explicit_timeout(deps):
+    """RQ's own default (180s) is plenty for text/pages — only the heavy
+    queue needs a longer ceiling."""
+    result = await save_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=18,
+        text="just some text",
+    )
+    assert result.source_type == "text"
+    assert deps.fast_queue.kwargs[0]["job_timeout"] is None
 
 
 async def test_save_voice_note_group_note_has_no_visibility(deps):

@@ -1,0 +1,44 @@
+# notes-gc-reclaim — the time-sensitive half of notes-gc, split out so it
+# can run every few minutes instead of once a day: a note whose worker died
+# mid-job (SIGKILL, an OOM kill, or an RQ job_timeout that fired somewhere
+# its own except-block could not catch — see queue/tasks.py's
+# process_note_async docstring) sits unrecoverable until this runs, and a
+# day is a long time for that to be true.
+#
+# Runs the `notes-app` image (no ffmpeg/whisper needed — this only rotates
+# rows and re-enqueues, the actual work happens on notes-worker-heavy/-fast).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: notes-gc-reclaim
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      # Short: this only scans one bounded batch (GC_BATCH_SIZE) of rows and
+      # re-enqueues them — if it is ever taking anywhere near this long,
+      # something is wrong and the next run five minutes later should not
+      # queue up behind it.
+      activeDeadlineSeconds: 240
+      template:
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: notes-bot-ghcr-pull-secret
+          containers:
+            - name: gc-reclaim
+              image: ghcr.io/poohpeer/bot-notes-app:latest
+              command: ["uv", "run", "--no-sync", "python", "-m", "notes_bot.cli.gc", "--job", "reclaim"]
+              envFrom:
+                - configMapRef:
+                    name: notes-bot-config
+                - secretRef:
+                    name: notes-bot-secrets
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
