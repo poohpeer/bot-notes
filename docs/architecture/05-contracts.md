@@ -178,14 +178,24 @@ class LLMResult:
 ```
 
 Порт не содержит `max_tokens` и `temperature`: ai-proxy их не принимает
-(`CompleteRequest` таких полей не имеет), и передавать их некуда. Провайдер в
-`ProxyAILLMClient` захардкожен в `codex`.
+(`CompleteRequest` таких полей не имеет), и передавать их некуда.
+
+**Fallback на `claude_code`.** `ProxyAILLMClient` сначала всегда пробует
+`provider="codex"`; при `503 quota_exhausted` (все codex-аккаунты
+исчерпали лимит одновременно - случалось в проде) повторяет тот же запрос
+с `provider="claude_code"`, прежде чем сдаться. Это подписочный логин
+Claude Code CLI (`claudeAiOauth`/`subscriptionType` в ai-proxy, не
+API-ключ) - списывается квота подписки, а не деньги по счётчику токенов.
+Любая другая ошибка (`timeout`, `provider_unreachable`, обрыв соединения)
+fallback не запускает: другой провайдер не чинит то, что не является
+нехваткой квоты. Парсинг JSON (ниже) работает одинаково независимо от
+того, какой из двух провайдеров реально ответил.
 
 Три реализации:
 
 | Реализация | Назначение |
 |---|---|
-| `ProxyAILLMClient` | Боевая. `POST /v1/complete` с `provider="codex"`, `output_format="text"`, явным `timeout_s`; при `json_schema` сама извлекает и валидирует JSON |
+| `ProxyAILLMClient` | Боевая. `POST /v1/complete` с `provider="codex"` (fallback на `claude_code` при `quota_exhausted`), `output_format="text"`, явным `timeout_s`; при `json_schema` сама извлекает и валидирует JSON |
 | `NullLLMClient` | Заглушка. `title` = первые слова текста, `tags` = пусто, `summary` = None, дубли не детектируются, `/smart_search` деградирует до `/search` |
 | `FakeLLMClient` | Тесты. Детерминированные ответы по ключу промпта |
 

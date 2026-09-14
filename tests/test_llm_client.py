@@ -150,6 +150,48 @@ async def test_quota_exhausted_is_flagged_separately_from_other_retryable_errors
     assert exc_info.value.retryable is True
 
 
+async def test_codex_quota_exhausted_falls_back_to_claude_code():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        calls.append(body["provider"])
+        if body["provider"] == "codex":
+            return httpx.Response(
+                503, json={"error": {"type": "quota_exhausted", "message": "no accounts left"}}
+            )
+        return _ok("from claude", model="claude-sonnet-5")
+
+    result = await _client(handler).complete(system="s", user="u")
+    assert calls == ["codex", "claude_code"]
+    assert result.text == "from claude"
+    assert result.model == "claude-sonnet-5"
+
+
+async def test_fallback_is_not_used_for_non_quota_errors():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        calls.append(body["provider"])
+        return httpx.Response(504, json={"error": {"type": "timeout", "message": "too slow"}})
+
+    with pytest.raises(LLMServiceError):
+        await _client(handler).complete(system="s", user="u")
+    assert calls == ["codex"]  # never tried claude_code — timeout isn't quota_exhausted
+
+
+async def test_when_both_providers_are_exhausted_the_fallbacks_error_surfaces():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503, json={"error": {"type": "quota_exhausted", "message": "no accounts left"}}
+        )
+
+    with pytest.raises(LLMServiceError) as exc_info:
+        await _client(handler).complete(system="s", user="u")
+    assert exc_info.value.is_quota_exhausted is True
+
+
 async def test_timeout_error_is_retryable_but_not_quota_exhausted():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(504, json={"error": {"type": "timeout", "message": "too slow"}})

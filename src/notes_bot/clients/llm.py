@@ -11,11 +11,14 @@ constructing a real client.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -122,14 +125,27 @@ def _extract_json(text: str) -> dict | None:
 
 
 class ProxyAILLMClient:
-    """The real thing — POST /v1/complete, provider="codex", per
+    """The real thing — POST /v1/complete, provider="codex" first, per
     05-contracts.md. codex never returns structured_output (see that doc's
     "Структурированный вывод по схеме недоступен"), so `json_schema`
     support is entirely this class's own doing: an instruction appended to
-    `system`, then parsing `result` as JSON with one retry on failure.
+    `system`, then parsing `result` as JSON with one retry on failure —
+    unaffected by which provider actually answered, since it works over
+    plain text either way.
+
+    Falls back to provider="claude_code" when codex reports every account
+    quota_exhausted (05-contracts.md's error table) — that CLI login is a
+    Claude subscription's rolling usage window, not per-token API billing
+    (ai-proxy's claude_code.py runs `claude -p`, authenticated via
+    `claudeAiOauth`/`subscriptionType`, not an API key), so retrying there
+    costs no more than the enrichment already not happening. Only for
+    quota_exhausted specifically — every other error (a real bug, a
+    provider genuinely unreachable) is not made better by trying again
+    against a different backend.
     """
 
-    _PROVIDER = "codex"
+    _PRIMARY_PROVIDER = "codex"
+    _FALLBACK_PROVIDER = "claude_code"
 
     def __init__(
         self,
@@ -189,8 +205,35 @@ class ProxyAILLMClient:
     async def _request(
         self, *, system: str, user: str, history: list[dict] | None, timeout_s: float
     ) -> dict:
+        try:
+            return await self._request_provider(
+                self._PRIMARY_PROVIDER,
+                system=system,
+                user=user,
+                history=history,
+                timeout_s=timeout_s,
+            )
+        except LLMServiceError as exc:
+            if not exc.is_quota_exhausted:
+                raise
+            log.warning(
+                "ai-proxy: %s quota_exhausted, falling back to %s",
+                self._PRIMARY_PROVIDER,
+                self._FALLBACK_PROVIDER,
+            )
+            return await self._request_provider(
+                self._FALLBACK_PROVIDER,
+                system=system,
+                user=user,
+                history=history,
+                timeout_s=timeout_s,
+            )
+
+    async def _request_provider(
+        self, provider: str, *, system: str, user: str, history: list[dict] | None, timeout_s: float
+    ) -> dict:
         body = {
-            "provider": self._PROVIDER,
+            "provider": provider,
             "prompt": user,
             "system": system,
             "output_format": "text",
