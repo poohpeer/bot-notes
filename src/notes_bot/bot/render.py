@@ -54,10 +54,22 @@ def render_debug_toggle_confirmation(*, enabled: bool) -> str:
     return "Debug-режим включён." if enabled else "Debug-режим выключен."
 
 
-def render_debug_processing_done(*, elapsed_s: float) -> str:
+_DEBUG_PREVIEW_MAX = 150
+
+
+def render_debug_processing_done(*, elapsed_s: float, indexed_text: str) -> str:
     """Sent by process_note itself once a note is fully processed, when the
-    owner has /debug on — see 03-ingest.md, "Debug: время обработки"."""
-    return f"⏱ Обработка завершена. Заняло: {elapsed_s:.1f}с"
+    owner has /debug on — see 03-ingest.md, "Debug: время обработки".
+    `indexed_text` is exactly what got chunked and embedded (no separate
+    LLM call to summarize it — enrich_note's own summary doesn't exist yet
+    at this point, it runs after process_note, and the point here is a
+    sanity check anyway: a preview of the real indexed text also reveals a
+    silent extraction failure that a fresh LLM summary would paper over."""
+    lines = [f"⏱ Обработка завершена. Заняло: {elapsed_s:.1f}с"]
+    preview = _truncate(indexed_text, _DEBUG_PREVIEW_MAX)
+    if preview:
+        lines.append(preview)
+    return "\n".join(lines)
 
 
 def render_processing_failed() -> str:

@@ -167,6 +167,7 @@ async def test_process_note_sends_debug_notification_when_enabled(factory):
     chat_id, text = sender.sent[0]
     assert chat_id == 1
     assert "Обработка завершена" in text
+    assert "hello world" in text  # preview of the indexed text
 
     # user_settings rows outlive this fixture's per-test cleanup (it only
     # tracks notes) — reset so a later test doesn't inherit user_id=1 stuck

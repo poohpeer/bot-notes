@@ -58,8 +58,26 @@ def test_debug_toggle_confirmation_off():
 
 
 def test_debug_processing_done_includes_elapsed_seconds():
-    text = render_debug_processing_done(elapsed_s=12.34)
+    text = render_debug_processing_done(elapsed_s=12.34, indexed_text="some indexed text")
     assert "12.3" in text
+
+
+def test_debug_processing_done_includes_a_preview_of_the_indexed_text():
+    text = render_debug_processing_done(
+        elapsed_s=1.0, indexed_text="Обзор уличной еды в Тбилиси, хинкали и хачапури"
+    )
+    assert "Обзор уличной еды в Тбилиси" in text
+
+
+def test_debug_processing_done_truncates_a_long_preview():
+    text = render_debug_processing_done(elapsed_s=1.0, indexed_text="a" * 500)
+    lines = text.splitlines()
+    assert len(lines[1]) <= 150
+
+
+def test_debug_processing_done_omits_the_preview_line_when_text_is_empty():
+    text = render_debug_processing_done(elapsed_s=1.0, indexed_text="")
+    assert text.splitlines() == ["⏱ Обработка завершена. Заняло: 1.0с"]
 
 
 def test_processing_failed_message():

@@ -240,7 +240,10 @@ async def process_note_async(
                 # never turned it on, not a reason to skip the check.
                 if await UserSettingsRepository(session).is_debug_enabled(user_id):
                     elapsed_s = time.perf_counter() - started
-                    await sender.send(chat_id, render_debug_processing_done(elapsed_s=elapsed_s))
+                    await sender.send(
+                        chat_id,
+                        render_debug_processing_done(elapsed_s=elapsed_s, indexed_text=text),
+                    )
 
             if llm_queue is not None:
                 # 03-ingest.md's sequence diagram: enrichment is queued
