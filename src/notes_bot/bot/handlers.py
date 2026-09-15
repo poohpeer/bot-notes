@@ -29,6 +29,7 @@ from notes_bot.bot.keyboards import (
     list_item_keyboard,
     list_more_keyboard,
     privacy_keyboard,
+    search_detail_keyboard,
     search_more_keyboard,
     trash_item_keyboard,
     trash_more_keyboard,
@@ -45,6 +46,7 @@ from notes_bot.bot.logic import (
     save_note,
     save_voice_note,
     set_group_capture_mode,
+    show_detail,
     show_more,
     smart_search,
     toggle_privacy,
@@ -65,6 +67,7 @@ from notes_bot.bot.render import (
     render_privacy_toggle_confirmation,
     render_search_card,
     render_search_expired,
+    render_search_summary_card,
     render_smart_answer_pending,
     render_trash_empty,
     render_voice_note_saved,
@@ -195,9 +198,35 @@ async def _send_page(
             await message.answer(debug_info)
         return
     for hit in hits:
-        await message.answer(render_search_card(hit))
+        # Short by default (render_search_summary_card) with a "Подробнее"
+        # button — session_id is always set here (never None alongside a
+        # non-empty hits list, see run_search/show_more), which is what the
+        # button needs to re-look-up this exact hit later.
+        await message.answer(
+            render_search_summary_card(hit),
+            reply_markup=search_detail_keyboard(session_id, hit.note_id),
+        )
     if has_more and session_id:
         await message.answer("Ещё?", reply_markup=search_more_keyboard(session_id))
+
+
+@router.callback_query(F.data.startswith("detail:"))
+async def on_show_detail(callback: CallbackQuery, deps: Deps) -> None:
+    session_id, _, note_id_raw = callback.data.removeprefix("detail:").partition(":")
+    try:
+        note_id = int(note_id_raw)
+    except ValueError:
+        await callback.answer()
+        return
+
+    hit = await show_detail(
+        deps, user_id=callback.from_user.id, session_id=session_id, note_id=note_id
+    )
+    await callback.answer()
+    if hit is None:
+        await callback.message.answer(render_search_expired())
+        return
+    await callback.message.answer(render_search_card(hit))
 
 
 @router.callback_query(F.data.startswith("vis:"))

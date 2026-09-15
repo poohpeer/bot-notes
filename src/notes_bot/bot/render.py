@@ -42,6 +42,7 @@ class RenderableHit:
     chunk_text: str
     is_owner: bool
     structured: dict
+    summary: str | None = None
 
 
 def render_privacy_toggle_confirmation(visibility: str) -> str:
@@ -101,21 +102,26 @@ def render_places(structured: dict) -> list[str]:
     return lines
 
 
-def render_search_card(hit: RenderableHit) -> str:
-    icon = _SOURCE_ICONS.get(hit.source_type, "📝")
+def _heading_for(hit: RenderableHit) -> tuple[str, bool]:
+    """(heading, is_bare_url) — shared between the full card and the short
+    summary card, so the two never disagree on what a note is called."""
     chunk = hit.chunk_text.strip()
     is_bare_url = bool(hit.source_url) and chunk == hit.source_url.strip()
 
     if hit.title:
-        heading = hit.title
-    elif is_bare_url:
-        heading = _PENDING_HEADING.get(hit.source_type, "Заметка")
-    else:
-        heading = _truncate(chunk, _TITLE_FALLBACK_MAX)
+        return hit.title, is_bare_url
+    if is_bare_url:
+        return _PENDING_HEADING.get(hit.source_type, "Заметка"), is_bare_url
+    return _truncate(chunk, _TITLE_FALLBACK_MAX), is_bare_url
+
+
+def render_search_card(hit: RenderableHit) -> str:
+    icon = _SOURCE_ICONS.get(hit.source_type, "📝")
+    heading, is_bare_url = _heading_for(hit)
     lines = [f"{icon} {heading}"]
 
     if not is_bare_url:
-        fragment = _truncate(chunk, _FRAGMENT_MAX)
+        fragment = _truncate(hit.chunk_text.strip(), _FRAGMENT_MAX)
         if fragment and fragment != heading:
             lines.append(fragment)
 
@@ -126,6 +132,29 @@ def render_search_card(hit: RenderableHit) -> str:
         lines.append(hit.source_url)
 
     lines.extend(render_places(hit.structured))
+
+    return "\n".join(lines)
+
+
+_SUMMARY_CARD_FRAGMENT_MAX = 120
+
+
+def render_search_summary_card(hit: RenderableHit) -> str:
+    """/search's default view (04-search.md, "Краткая выдача") — one or two
+    lines per hit instead of the full card, so a page of several results
+    doesn't turn into a wall of text to scroll past. `summary` only exists
+    for notes enrich_note actually summarized (long-enough text, LLM
+    enabled) — falls back to the same truncated fragment the full card
+    uses when there isn't one. "Подробнее" (keyboards.search_detail_keyboard)
+    expands to render_search_card for this exact hit."""
+    icon = _SOURCE_ICONS.get(hit.source_type, "📝")
+    heading, is_bare_url = _heading_for(hit)
+    lines = [f"{icon} {heading}"]
+
+    if not is_bare_url:
+        body = hit.summary or _truncate(hit.chunk_text.strip(), _SUMMARY_CARD_FRAGMENT_MAX)
+        if body and body != heading:
+            lines.append(body)
 
     return "\n".join(lines)
 

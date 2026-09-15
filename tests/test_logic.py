@@ -19,6 +19,7 @@ from notes_bot.bot.logic import (
     save_note,
     save_voice_note,
     set_group_capture_mode,
+    show_detail,
     show_more,
     smart_search,
     toggle_privacy,
@@ -571,3 +572,54 @@ async def test_show_more_excludes_a_note_deleted_between_pages(deps, db_engine):
 
     more = await show_more(deps, user_id=1, session_id=first_page.session_id)
     assert more.hits == []
+
+
+async def test_show_detail_returns_the_full_hit_for_a_note_in_the_session(deps, db_engine):
+    note_id = await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+
+    page = await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
+    hit = await show_detail(deps, user_id=1, session_id=page.session_id, note_id=note_id)
+
+    assert hit is not None
+    assert hit.note_id == note_id
+
+
+async def test_show_detail_on_unknown_session_returns_none(deps, db_engine):
+    note_id = await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+    hit = await show_detail(deps, user_id=1, session_id="does-not-exist", note_id=note_id)
+    assert hit is None
+
+
+async def test_show_detail_rejects_a_note_id_not_in_the_session(deps, db_engine):
+    """A tampered or stale callback_data must not let a note outside the
+    original search's own result set be looked up through this session —
+    private to another user, so ACL excludes it from user 1's results."""
+    await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+    other_id = await _add_note_with_chunk(
+        db_engine, user_id=2, chat_id=2, visibility="private", x=0.0, y=1.0
+    )
+
+    page = await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
+    hit = await show_detail(deps, user_id=1, session_id=page.session_id, note_id=other_id)
+
+    assert hit is None
+    assert other_id not in [h.note_id for h in page.hits]  # sanity: really excluded
+
+
+async def test_show_detail_rechecks_acl_and_hides_a_note_made_private_since(deps, db_engine):
+    """Re-checked at click time, not trusted from the original search
+    snapshot — same reasoning as show_more's own deleted-between-pages test."""
+    note_id = await _add_note_with_chunk(
+        db_engine, user_id=2, chat_id=2, visibility="public", x=0.99, y=0.01
+    )
+
+    page = await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
+
+    sf = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sf() as session:
+        note = await session.get(Note, note_id)
+        note.visibility = "private"
+        await session.commit()
+
+    hit = await show_detail(deps, user_id=1, session_id=page.session_id, note_id=note_id)
+    assert hit is None

@@ -297,6 +297,43 @@ async def show_more(deps: Deps, *, user_id: int, session_id: str) -> ShowMoreRes
     return ShowMoreResult(hits=hits, has_more=new_offset < len(cached.note_ids), expired=False)
 
 
+async def show_detail(
+    deps: Deps, *, user_id: int, session_id: str, note_id: int
+) -> RenderableHit | None:
+    """ "Подробнее" under a /search summary card (render.render_search_summary_card)
+    — expands to the full render_search_card for one hit. Re-checks ACL at
+    click time rather than trusting the original search's snapshot, same
+    reasoning as show_more: visibility can change between the search and
+    the click. None covers every reason not to show it — expired session,
+    a note_id that was never part of it (tampered callback_data), or one
+    that is no longer visible — the caller doesn't need to tell those apart."""
+    cached = await deps.search_cache.get(user_id, session_id)
+    if cached is None:
+        return None
+    try:
+        index = cached.note_ids.index(note_id)
+    except ValueError:
+        return None
+
+    is_group_chat = cached.scope_chat_id is not None
+    predicate = visibility_predicate(
+        user_id=user_id,
+        chat_id=cached.scope_chat_id if is_group_chat else user_id,
+        is_group_chat=is_group_chat,
+        search_mode=cached.mode,
+    )
+
+    async with deps.session_factory() as session:
+        visible = await NoteRepository(session).get_visible_by_ids(
+            [note_id], acl_predicate=predicate
+        )
+
+    note = visible.get(note_id)
+    if note is None:
+        return None
+    return _to_renderable_from_note(note, cached.fragments[index])
+
+
 def _to_renderable(hit) -> RenderableHit:
     return RenderableHit(
         note_id=hit.note_id,
@@ -308,6 +345,7 @@ def _to_renderable(hit) -> RenderableHit:
         # Delete button rendering is M6 scope; ownership isn't surfaced yet.
         is_owner=False,
         structured=hit.structured,
+        summary=hit.summary,
     )
 
 
@@ -321,6 +359,7 @@ def _to_renderable_from_note(note, chunk_text: str) -> RenderableHit:
         chunk_text=chunk_text,
         is_owner=False,
         structured=note.structured,
+        summary=note.summary,
     )
 
 

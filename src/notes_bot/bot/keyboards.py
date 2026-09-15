@@ -3,6 +3,7 @@ build or test one. Callback data formats:
 
     vis:{note_id}         toggle privacy (ADR-5: flips whatever is stored)
     more:{session_id}     "show more" search pagination, see 04-search.md
+    detail:{session_id}:{note_id}   expand a /search summary card to the full one
     listmore:{offset}     "show more" for /list, plain SQL offset
     trashmore:{offset}    "show more" for /trash, plain SQL offset
     del:{note_id}         delete — asks for confirmation first
@@ -29,6 +30,14 @@ def search_more_keyboard(session_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Показать ещё 5", callback_data=f"more:{session_id}")]
+        ]
+    )
+
+
+def search_detail_keyboard(session_id: str, note_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Подробнее", callback_data=f"detail:{session_id}:{note_id}")]
         ]
     )
 

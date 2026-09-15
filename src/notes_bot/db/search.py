@@ -28,6 +28,7 @@ class SearchHit:
     chunk_text: str
     distance: float
     structured: dict
+    summary: str | None
 
 
 async def search_notes(
@@ -117,6 +118,7 @@ async def _search_notes(
             Note.source_type,
             Note.tags,
             Note.structured,
+            Note.summary,
             best.c.chunk_text,
             best.c.distance,
         )
@@ -137,6 +139,7 @@ async def _search_notes(
             source_type=row.source_type,
             tags=row.tags,
             structured=row.structured,
+            summary=row.summary,
             chunk_text=row.chunk_text,
             distance=row.distance,
         )
