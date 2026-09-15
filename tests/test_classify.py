@@ -69,3 +69,34 @@ def test_url_is_extracted_alongside_surrounding_text():
 def test_only_the_first_url_is_used():
     result = classify_text_message("https://example.com/a and also https://example.com/b")
     assert result.source_url == "https://example.com/a"
+
+
+def test_curly_closing_quote_is_stripped():
+    """Real production bug: a curly quote (iOS/macOS autocorrect turning "
+    into ”) glued onto the end of a pasted link made it past classification
+    and broke DNS resolution outright ("Invalid IDNA hostname") deep inside
+    the page extractor instead."""
+    result = classify_text_message("check this out https://google.com”")
+    assert result.source_url == "https://google.com"
+
+
+def test_straight_quotes_around_the_url_are_stripped():
+    result = classify_text_message('recommend "https://example.com/place" here')
+    assert result.source_url == "https://example.com/place"
+
+
+def test_trailing_sentence_punctuation_is_stripped():
+    result = classify_text_message("check out https://example.com/place.")
+    assert result.source_url == "https://example.com/place"
+
+
+def test_unbalanced_trailing_paren_is_stripped():
+    result = classify_text_message("see this (https://example.com/place)")
+    assert result.source_url == "https://example.com/place"
+
+
+def test_balanced_paren_in_the_url_itself_is_kept():
+    """A wiki-style URL can legitimately end in ')' — only strip one that
+    isn't balanced by a '(' earlier in the URL."""
+    result = classify_text_message("https://en.wikipedia.org/wiki/Foo_(bar)")
+    assert result.source_url == "https://en.wikipedia.org/wiki/Foo_(bar)"

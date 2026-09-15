@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from notes_bot.bot.render import (
     render_debug_processing_done,
     render_places,
+    render_processing_failed,
     render_smart_answer_failed,
 )
 from notes_bot.clients.alerts import AlertNotifier, NullNotifier, build_notifier
@@ -263,6 +264,8 @@ async def process_note_async(
             await alerts.failed(
                 note_id=note_id, source_type=source_type, source_url=source_url, error=str(exc)
             )
+            if sender is not None:
+                await sender.send(chat_id, render_processing_failed())
         except Exception as exc:  # noqa: BLE001 — logged and recorded, not swallowed
             await session.rollback()
             async with session_factory() as failure_session:
@@ -273,6 +276,8 @@ async def process_note_async(
             await alerts.failed(
                 note_id=note_id, source_type=source_type, source_url=source_url, error=str(exc)
             )
+            if sender is not None:
+                await sender.send(chat_id, render_processing_failed())
         finally:
             # 06-deployment.md, "Время обработки по source_type" —
             # separately shows the real cost of Whisper.

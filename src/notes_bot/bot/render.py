@@ -59,6 +59,16 @@ def render_debug_processing_done(*, elapsed_s: float) -> str:
     return f"⏱ Обработка завершена. Заняло: {elapsed_s:.1f}с"
 
 
+def render_processing_failed() -> str:
+    """process_note's own except-block sends this to the note's own chat —
+    previously only an ops-side alert (clients/alerts.py) went out on a
+    failure, and the person who actually sent the note got silence, no
+    different from a note that was still quietly processing. No error text
+    here: that's for the ops alert, not the end user (03-ingest.md,
+    "Обработка не удалась")."""
+    return "❌ Не получилось обработать заметку. Попробуйте отправить ссылку ещё раз."
+
+
 def _google_maps_search_url(query: str) -> str:
     # No geocoding step anywhere in this pipeline — a search URL (Google's
     # own documented fallback for "I have a name/address, not coordinates")

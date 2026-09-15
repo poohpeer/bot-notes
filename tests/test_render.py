@@ -17,6 +17,7 @@ from notes_bot.bot.render import (
     render_note_restored,
     render_places,
     render_privacy_toggle_confirmation,
+    render_processing_failed,
     render_search_card,
     render_search_expired,
     render_trash_empty,
@@ -57,6 +58,10 @@ def test_debug_toggle_confirmation_off():
 def test_debug_processing_done_includes_elapsed_seconds():
     text = render_debug_processing_done(elapsed_s=12.34)
     assert "12.3" in text
+
+
+def test_processing_failed_message():
+    assert render_processing_failed()
 
 
 def test_card_uses_title_when_present():

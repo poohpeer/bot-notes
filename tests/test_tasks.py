@@ -187,7 +187,10 @@ async def test_process_note_sends_nothing_when_debug_disabled(factory):
     assert sender.sent == []
 
 
-async def test_process_note_sends_nothing_on_failure_even_with_debug_enabled(factory):
+async def test_process_note_sends_no_debug_timing_on_failure_even_with_debug_enabled(factory):
+    """The /debug timing message (render_debug_processing_done) is a
+    success-only thing — a failure gets render_processing_failed instead
+    (below), never both."""
     note_id = await factory.insert_pending_text_note()
     async with factory() as session:
         await UserSettingsRepository(session).toggle_debug(user_id=1)
@@ -199,11 +202,52 @@ async def test_process_note_sends_nothing_on_failure_even_with_debug_enabled(fac
         note_id, session_factory=factory, embedding_client=client, sender=sender
     )
 
-    assert sender.sent == []
+    assert len(sender.sent) == 1
+    assert "Обработка завершена" not in sender.sent[0][1]
 
     async with factory() as session:
         await UserSettingsRepository(session).toggle_debug(user_id=1)
         await session.commit()
+
+
+async def test_process_note_notifies_the_user_on_embedding_failure(factory):
+    """Previously only clients/alerts.py's ops-side alert fired on a
+    failure — the person who actually sent the note got silence, no
+    different from one still quietly processing."""
+    note_id = await factory.insert_pending_text_note()
+    sender = FakeSender()
+    client = FakeEmbeddingClient(fail=EmbeddingServiceError(503, "model not loaded"))
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=client, sender=sender
+    )
+
+    assert len(sender.sent) == 1
+    chat_id, text = sender.sent[0]
+    assert chat_id == 1
+    assert "Не получилось обработать заметку" in text
+
+
+async def test_process_note_notifies_the_user_on_an_unexpected_exception(factory):
+    note_id = await factory.insert_pending_note(source_type="page", source_url="https://x")
+    sender = FakeSender()
+
+    class BrokenExtractor:
+        async def extract(self, note):
+            raise ValueError("boom")
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        extractors={"page": BrokenExtractor()},
+        sender=sender,
+    )
+
+    assert len(sender.sent) == 1
+    chat_id, text = sender.sent[0]
+    assert chat_id == 1
+    assert "Не получилось обработать заметку" in text
 
 
 class FakeAlerts:

@@ -11,6 +11,16 @@ from urllib.parse import urlparse
 
 _URL_RE = re.compile(r"https?://\S+")
 
+# `\S+` above is greedy and stops only at whitespace, so a URL quoted or
+# followed by punctuation in prose — "https://google.com", (see
+# https://x.com/y) — pulls that character in too. A real production
+# example: iOS/macOS autocorrect turns a straight quote into a curly one
+# (”), which then makes it into urlparse's hostname and breaks DNS
+# resolution outright ("Invalid IDNA hostname"). Stripped after matching,
+# not folded into the regex, so this can stay a plain character class
+# instead of a lookahead.
+_TRAILING_PUNCTUATION = ".,;:!?\"'“”‘’«»\\]}>"
+
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com"}
 _INSTAGRAM_HOSTS = {"instagram.com", "www.instagram.com"}
 # maps.google.* covers every ccTLD Google Maps has used (maps.google.com,
@@ -35,7 +45,7 @@ def classify_text_message(text: str) -> Classification:
     if not match:
         return Classification(source_type="text", source_url=None)
 
-    url = match.group(0)
+    url = _strip_trailing_punctuation(match.group(0))
     host = (urlparse(url).hostname or "").lower()
 
     if host in _YOUTUBE_HOSTS:
@@ -53,3 +63,15 @@ def _is_map_link(url: str, host: str) -> bool:
     if host == "goo.gl" and urlparse(url).path.startswith("/maps"):
         return True
     return host.startswith("maps.google.")
+
+
+def _strip_trailing_punctuation(url: str) -> str:
+    while url and url[-1] in _TRAILING_PUNCTUATION:
+        url = url[:-1]
+    # ')' is handled separately from the plain character class above: a
+    # trailing ')' is only noise if it isn't balanced by a '(' earlier in
+    # the URL itself — e.g. a bare wiki link
+    # (https://en.wikipedia.org/wiki/Foo_(bar)) has a real one.
+    while url.endswith(")") and url.count("(") < url.count(")"):
+        url = url[:-1]
+    return url
