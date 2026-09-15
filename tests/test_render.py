@@ -3,6 +3,8 @@ from urllib.parse import unquote
 from notes_bot.bot.render import (
     RenderableHit,
     render_capture_mode_changed,
+    render_debug_processing_done,
+    render_debug_toggle_confirmation,
     render_delete_confirmation_prompt,
     render_delete_refused,
     render_edit_refused,
@@ -42,6 +44,19 @@ def test_privacy_confirmation_private():
 
 def test_privacy_confirmation_public():
     assert "публичная" in render_privacy_toggle_confirmation("public")
+
+
+def test_debug_toggle_confirmation_on():
+    assert "включён" in render_debug_toggle_confirmation(enabled=True)
+
+
+def test_debug_toggle_confirmation_off():
+    assert "выключен" in render_debug_toggle_confirmation(enabled=False)
+
+
+def test_debug_processing_done_includes_elapsed_seconds():
+    text = render_debug_processing_done(elapsed_s=12.34)
+    assert "12.3" in text
 
 
 def test_card_uses_title_when_present():

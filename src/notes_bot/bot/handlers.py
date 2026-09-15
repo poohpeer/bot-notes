@@ -51,6 +51,7 @@ from notes_bot.bot.logic import (
 )
 from notes_bot.bot.render import (
     render_capture_mode_changed,
+    render_debug_toggle_confirmation,
     render_delete_confirmation_prompt,
     render_delete_refused,
     render_edit_saved,
@@ -101,6 +102,17 @@ async def _set_search_mode(message: Message, deps: Deps, mode: str) -> None:
         await session.commit()
     label = "только свои" if mode == "mine_only" else "все"
     await message.answer(f"Режим поиска: {label}.")
+
+
+@router.message(Command("debug"))
+async def on_debug(message: Message, deps: Deps) -> None:
+    """Toggle — see 03-ingest.md, "Debug: время обработки". The
+    notification itself is sent by process_note in the worker, not here;
+    this only flips the setting it reads."""
+    async with deps.session_factory() as session:
+        enabled = await UserSettingsRepository(session).toggle_debug(message.from_user.id)
+        await session.commit()
+    await message.answer(render_debug_toggle_confirmation(enabled=enabled))
 
 
 @router.message(Command("search"))

@@ -518,6 +518,28 @@ class UserSettingsRepository:
             update(UserSettings).where(UserSettings.user_id == user_id).values(search_mode=mode)
         )
 
+    async def toggle_debug(self, user_id: int) -> bool:
+        """Flips `debug_enabled` and returns the new value — the handler
+        needs it to confirm which state was just set (03-ingest.md,
+        "Debug: время обработки")."""
+        row = await self.get_or_create(user_id)
+        new_value = not row.debug_enabled
+        await self._session.execute(
+            update(UserSettings)
+            .where(UserSettings.user_id == user_id)
+            .values(debug_enabled=new_value)
+        )
+        return new_value
+
+    async def is_debug_enabled(self, user_id: int) -> bool:
+        # No get_or_create: a user who never touched /debug has no row, and
+        # process_note (called on every note, not just this user's) should
+        # not INSERT one just to read a False it already knows.
+        result = await self._session.execute(
+            select(UserSettings.debug_enabled).where(UserSettings.user_id == user_id)
+        )
+        return bool(result.scalar_one_or_none())
+
 
 class ChatSettingsRepository:
     def __init__(self, session: AsyncSession) -> None:

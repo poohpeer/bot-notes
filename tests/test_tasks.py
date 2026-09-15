@@ -9,10 +9,18 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.clients.embeddings import EmbeddingServiceError
 from notes_bot.db.models import Note, NoteChunk
-from notes_bot.db.repositories import NoteRepository
+from notes_bot.db.repositories import NoteRepository, UserSettingsRepository
 from notes_bot.queue.tasks import process_note_async
 
 pytestmark = pytest.mark.asyncio
+
+
+class FakeSender:
+    def __init__(self) -> None:
+        self.sent: list[tuple[int, str]] = []
+
+    async def send(self, chat_id, text):
+        self.sent.append((chat_id, text))
 
 
 class FakeEmbeddingClient:
@@ -142,6 +150,60 @@ async def test_process_note_marks_failed_on_embedding_error(factory):
         REGISTRY.get_sample_value("notes_status_failed_total", {"source_type": "text"})
         == failed_before + 1
     )
+
+
+async def test_process_note_sends_debug_notification_when_enabled(factory):
+    note_id = await factory.insert_pending_text_note()
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=FakeEmbeddingClient(), sender=sender
+    )
+
+    assert len(sender.sent) == 1
+    chat_id, text = sender.sent[0]
+    assert chat_id == 1
+    assert "Обработка завершена" in text
+
+    # user_settings rows outlive this fixture's per-test cleanup (it only
+    # tracks notes) — reset so a later test doesn't inherit user_id=1 stuck
+    # with debug on.
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+
+async def test_process_note_sends_nothing_when_debug_disabled(factory):
+    note_id = await factory.insert_pending_text_note()
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=FakeEmbeddingClient(), sender=sender
+    )
+
+    assert sender.sent == []
+
+
+async def test_process_note_sends_nothing_on_failure_even_with_debug_enabled(factory):
+    note_id = await factory.insert_pending_text_note()
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+    sender = FakeSender()
+    client = FakeEmbeddingClient(fail=EmbeddingServiceError(503, "model not loaded"))
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=client, sender=sender
+    )
+
+    assert sender.sent == []
+
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
 
 
 class FakeAlerts:

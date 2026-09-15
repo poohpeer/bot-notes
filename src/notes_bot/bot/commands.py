@@ -25,6 +25,7 @@ _COMMON_COMMANDS = [
     BotCommand(command="smart_search", description="Поиск с ответом от LLM"),
     BotCommand(command="search_mine", description="Искать только свои заметки"),
     BotCommand(command="search_all", description="Искать заметки всех"),
+    BotCommand(command="debug", description="Вкл/выкл время обработки заметок"),
 ]
 
 PRIVATE_COMMANDS = [

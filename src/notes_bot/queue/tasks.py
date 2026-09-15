@@ -28,7 +28,11 @@ from rq import Queue
 from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from notes_bot.bot.render import render_places, render_smart_answer_failed
+from notes_bot.bot.render import (
+    render_debug_processing_done,
+    render_places,
+    render_smart_answer_failed,
+)
 from notes_bot.clients.alerts import AlertNotifier, NullNotifier, build_notifier
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
 from notes_bot.clients.llm import LLMClient, LLMServiceError, NullLLMClient, ProxyAILLMClient
@@ -169,6 +173,7 @@ async def process_note_async(
     extractors: dict[str, Extractor] | None = None,
     llm_queue: Queue | None = None,
     alerts: AlertNotifier | None = None,
+    sender: Sender | None = None,
 ) -> None:
     # Empty, not a module-level default: a 'text' note never consults this
     # (see _extract_and_get_index_text), and every other source_type is
@@ -205,6 +210,8 @@ async def process_note_async(
         # implicit (and here, unawaited) lazy-load.
         source_type = note.source_type
         source_url = note.source_url
+        user_id = note.user_id
+        chat_id = note.chat_id
 
         started = time.perf_counter()
         try:
@@ -225,6 +232,14 @@ async def process_note_async(
             await note_repo.mark_done(note_id)
             await session.commit()
             log.info("process_note: note_id=%s done, chunks=%d", note_id, len(new_chunks))
+
+            if sender is not None:
+                # /debug (03-ingest.md, "Debug: время обработки") — opt-in,
+                # so this check is a cheap SELECT for every note whose owner
+                # never turned it on, not a reason to skip the check.
+                if await UserSettingsRepository(session).is_debug_enabled(user_id):
+                    elapsed_s = time.perf_counter() - started
+                    await sender.send(chat_id, render_debug_processing_done(elapsed_s=elapsed_s))
 
             if llm_queue is not None:
                 # 03-ingest.md's sequence diagram: enrichment is queued
@@ -283,6 +298,7 @@ def process_note(note_id: int) -> None:
             extractors=_get_extractors(settings),
             llm_queue=_get_llm_queue(settings),
             alerts=_get_alerts(settings),
+            sender=TelegramSender(settings.telegram_bot_token),
         )
     )
 

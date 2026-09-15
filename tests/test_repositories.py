@@ -190,6 +190,25 @@ async def test_user_settings_get_or_create_returns_defaults(db_session):
     settings = await repo.get_or_create(user_id=42)
     assert settings.search_mode == "all"
     assert settings.default_visibility == "private"
+    assert settings.debug_enabled is False
+
+
+async def test_toggle_debug_flips_and_returns_the_new_value(db_session):
+    repo = UserSettingsRepository(db_session)
+    assert await repo.is_debug_enabled(42) is False
+
+    first = await repo.toggle_debug(42)
+    assert first is True
+    assert await repo.is_debug_enabled(42) is True
+
+    second = await repo.toggle_debug(42)
+    assert second is False
+    assert await repo.is_debug_enabled(42) is False
+
+
+async def test_is_debug_enabled_for_a_user_with_no_row_is_false(db_session):
+    repo = UserSettingsRepository(db_session)
+    assert await repo.is_debug_enabled(999) is False
 
 
 async def test_user_settings_get_or_create_is_idempotent(db_session):

@@ -170,6 +170,11 @@ class UserSettings(Base):
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     search_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default="all")
     default_visibility: Mapped[str] = mapped_column(Text, nullable=False, server_default="private")
+    # /debug — a temporary diagnostic toggle (see 03-ingest.md, "Debug:
+    # время обработки"): when on, process_note sends a follow-up message
+    # with how long a note's processing actually took. Off by default so
+    # nobody gets it without asking.
+    debug_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

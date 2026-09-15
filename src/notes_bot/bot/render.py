@@ -49,6 +49,16 @@ def render_privacy_toggle_confirmation(visibility: str) -> str:
     return f"Заметка теперь {label}."
 
 
+def render_debug_toggle_confirmation(*, enabled: bool) -> str:
+    return "Debug-режим включён." if enabled else "Debug-режим выключен."
+
+
+def render_debug_processing_done(*, elapsed_s: float) -> str:
+    """Sent by process_note itself once a note is fully processed, when the
+    owner has /debug on — see 03-ingest.md, "Debug: время обработки"."""
+    return f"⏱ Обработка завершена. Заняло: {elapsed_s:.1f}с"
+
+
 def _google_maps_search_url(query: str) -> str:
     # No geocoding step anywhere in this pipeline — a search URL (Google's
     # own documented fallback for "I have a name/address, not coordinates")
