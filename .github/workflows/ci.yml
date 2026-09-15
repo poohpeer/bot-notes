@@ -313,8 +313,19 @@ jobs:
           if ($heavyLog -notmatch 'notes-worker starting') {
             throw "notes-worker-heavy never started its poll loop."
           }
-          if ($embLog -notmatch 'model ready') {
-            throw "notes-embeddings never finished loading the model."
+          # Not $embLog for this one: notes-embeddings only restarts (and
+          # its own log tail only covers) when its image/manifest actually
+          # changed that deploy. A deploy that only touched bot-notes-app
+          # left the same long-running embeddings pod in place, whose
+          # "model ready" startup line had long since scrolled past
+          # --tail=50 under a steady stream of kube-probe hits — a real,
+          # working service that still failed this check. notes-bot's own
+          # startup, by contrast, always happens fresh (a new image tag
+          # every run), and it always makes exactly this call before it
+          # ever logs "starting up" — proof embeddings answered, sourced
+          # from a log guaranteed to be recent.
+          if ($botLog -notmatch 'notes-embeddings:8000/model.*200 OK') {
+            throw "notes-bot never got a working response from notes-embeddings at startup."
           }
           Write-Host "all four processes are up"
 
