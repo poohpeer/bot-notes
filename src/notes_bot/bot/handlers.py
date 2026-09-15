@@ -130,7 +130,7 @@ async def on_search(message: Message, deps: Deps) -> None:
         is_group_chat=is_group_chat,
         query_text=query_text,
     )
-    await _send_page(message, page.hits, page.has_more, page.session_id)
+    await _send_page(message, page.hits, page.has_more, page.session_id, debug_info=page.debug_info)
 
 
 @router.message(Command("smart_search"))
@@ -150,6 +150,8 @@ async def on_smart_search(message: Message, deps: Deps) -> None:
     )
     if not page.hits:
         await message.answer(render_no_more_results())
+        if page.debug_info:
+            await message.answer(page.debug_info)
         return
     if deps.settings.llm_enabled:
         # No raw search cards — /smart_search's whole point is the LLM's
@@ -179,9 +181,18 @@ async def on_show_more(callback: CallbackQuery, deps: Deps) -> None:
     await _send_page(callback.message, result.hits, result.has_more, session_id)
 
 
-async def _send_page(message: Message, hits, has_more: bool, session_id: str | None) -> None:
+async def _send_page(
+    message: Message,
+    hits,
+    has_more: bool,
+    session_id: str | None,
+    *,
+    debug_info: str | None = None,
+) -> None:
     if not hits:
         await message.answer(render_no_more_results())
+        if debug_info:
+            await message.answer(debug_info)
         return
     for hit in hits:
         await message.answer(render_search_card(hit))

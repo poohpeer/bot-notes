@@ -134,6 +134,24 @@ def render_no_more_results() -> str:
     return "Больше ничего не найдено."
 
 
+def render_search_debug_empty(
+    near_misses: list[tuple[str, float]], *, max_distance: float | None
+) -> str:
+    """/debug (03-ingest.md, "Debug: почему поиск ничего не нашёл") — sent
+    right after "ничего не найдено", when the caller has debug on, so
+    tuning SEARCH_MAX_DISTANCE doesn't require pulling distances out of the
+    database by hand. `near_misses`: (label, distance) for the closest hits
+    that existed but didn't clear the threshold — every note in the corpus
+    could still be too far, which is a different, more useful thing to know
+    than "the query returned nothing"."""
+    if not near_misses:
+        return "🔍 Debug: в базе вообще нет заметок, видимых для этого поиска."
+    threshold_note = f" (порог {max_distance})" if max_distance is not None else ""
+    lines = [f"🔍 Debug: ничего не прошло порог релевантности{threshold_note}. Ближе всего:"]
+    lines += [f"  {label} — distance={distance:.3f}" for label, distance in near_misses]
+    return "\n".join(lines)
+
+
 def render_search_expired() -> str:
     return "Поиск устарел, повторите запрос."
 

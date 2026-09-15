@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from rq import Queue
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from notes_bot.bot.render import RenderableHit
+from notes_bot.bot.render import RenderableHit, render_search_debug_empty
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.config import Settings
@@ -147,11 +147,18 @@ async def toggle_privacy(deps: Deps, *, note_id: int, user_id: int) -> str | Non
     return new_visibility
 
 
+_NEAR_MISS_COUNT = 3
+
+
 @dataclass(frozen=True)
 class SearchPageResult:
     hits: list[RenderableHit]
     has_more: bool
     session_id: str | None
+    # Only ever set alongside `hits == []` — see render_search_debug_empty.
+    # Built from data already fetched for the (empty) result itself, not a
+    # second query, and only when the caller has /debug on.
+    debug_info: str | None = None
 
 
 async def run_search(
@@ -169,7 +176,12 @@ async def run_search(
         predicate = visibility_predicate(
             user_id=user_id, chat_id=chat_id, is_group_chat=is_group_chat, search_mode=search_mode
         )
-        hits = await search_notes(
+        # Fetched unfiltered and thresholded here in Python, not in SQL:
+        # when nothing clears SEARCH_MAX_DISTANCE, a /debug caller still
+        # wants to see what the closest candidates actually were, and that
+        # data no longer exists once max_distance drops it at the SQL layer.
+        max_distance = deps.settings.search_max_distance
+        raw_hits = await search_notes(
             session,
             query_vector=query_vector,
             acl_predicate=predicate,
@@ -177,11 +189,22 @@ async def run_search(
             candidate_k=deps.settings.search_candidate_k,
             limit=50,
             offset=0,
-            max_distance=deps.settings.search_max_distance,
+            max_distance=None,
+        )
+        hits = (
+            raw_hits
+            if max_distance is None
+            else [h for h in raw_hits if h.distance <= max_distance]
         )
 
-    if not hits:
-        return SearchPageResult(hits=[], has_more=False, session_id=None)
+        if not hits:
+            debug_info = None
+            if await UserSettingsRepository(session).is_debug_enabled(user_id):
+                near_misses = [
+                    (h.title or h.chunk_text[:40], h.distance) for h in raw_hits[:_NEAR_MISS_COUNT]
+                ]
+                debug_info = render_search_debug_empty(near_misses, max_distance=max_distance)
+            return SearchPageResult(hits=[], has_more=False, session_id=None, debug_info=debug_info)
 
     session_id = await deps.search_cache.create(
         user_id=user_id,

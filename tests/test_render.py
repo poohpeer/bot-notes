@@ -19,6 +19,7 @@ from notes_bot.bot.render import (
     render_privacy_toggle_confirmation,
     render_processing_failed,
     render_search_card,
+    render_search_debug_empty,
     render_search_expired,
     render_trash_empty,
 )
@@ -62,6 +63,20 @@ def test_debug_processing_done_includes_elapsed_seconds():
 
 def test_processing_failed_message():
     assert render_processing_failed()
+
+
+def test_search_debug_empty_lists_near_misses_with_distances():
+    text = render_search_debug_empty(
+        [("Хинкальная на Руставели", 0.234), ("Велодорожка в парке", 0.256)], max_distance=0.18
+    )
+    assert "distance=0.234" in text
+    assert "distance=0.256" in text
+    assert "0.18" in text
+
+
+def test_search_debug_empty_with_no_near_misses_says_the_corpus_is_empty():
+    text = render_search_debug_empty([], max_distance=0.18)
+    assert "нет заметок" in text
 
 
 def test_card_uses_title_when_present():
