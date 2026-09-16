@@ -169,10 +169,15 @@ def test_card_for_a_titled_link_note_still_shows_the_url_once():
 
 
 def test_card_includes_places_as_maps_links():
+    """The place name is the clickable text (HTML <a> — see render_places'
+    own docstring on why callers must send with parse_mode="HTML"), not a
+    raw URL printed next to it."""
     structured = {"places": [{"name": "Кахелеби", "location_hint": "Кахетинское шоссе"}]}
     card = render_search_card(_hit(title="x", structured=structured))
-    assert "📍 Кахелеби — https://www.google.com/maps/search/?api=1&query=" in card
-    assert "Кахелеби Кахетинское шоссе" in unquote(card.split("query=")[1])
+    assert '📍 <a href="https://www.google.com/maps/search/?api=1&amp;query=' in card
+    assert ">Кахелеби</a>" in card
+    query_param = card.split("query=")[1].split('"')[0]
+    assert "Кахелеби Кахетинское шоссе" in unquote(query_param)
 
 
 def test_card_omits_places_line_when_none():
@@ -226,7 +231,8 @@ def test_render_places_skips_entries_with_no_name():
 def test_render_places_works_without_location_hint():
     lines = render_places({"places": [{"name": "Ботанический сад"}]})
     assert len(lines) == 1
-    assert lines[0].startswith("📍 Ботанический сад — ")
+    assert lines[0].startswith('📍 <a href="https://www.google.com/maps/search/')
+    assert lines[0].endswith(">Ботанический сад</a>")
 
 
 def test_render_places_on_malformed_structured_is_empty():

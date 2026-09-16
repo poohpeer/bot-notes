@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from html import escape as _esc
 
 from redis import Redis
 from rq import Queue
@@ -618,19 +619,24 @@ async def smart_answer_async(
         await sender.send(chat_id, render_smart_answer_failed())
         return
 
+    # render_places returns HTML (place names as <a href>, see its own
+    # docstring) — this whole message is sent with parse_mode="HTML" below,
+    # so every other dynamic piece (LLM-generated answer text; note
+    # title/chunk_text/source_url, all arbitrary internet content) must be
+    # escaped too, or a stray '<'/'&' anywhere in them would break parsing.
     source_lines = []
     for h in hits:
-        line = f"[{h.note_id}] {h.title or h.chunk_text[:40]}"
+        line = f"[{h.note_id}] {_esc(h.title or h.chunk_text[:40])}"
         if h.source_url:
-            line += f" — {h.source_url}"
+            line += f" — {_esc(h.source_url)}"
         source_lines.append(line)
         # /smart_search shows no raw cards any more (04-search.md) — this
         # is the only place a video note's extracted places (render.py's
         # render_places, from generate_places) ever reach the user.
         source_lines.extend(f"  {place_line}" for place_line in render_places(h.structured))
     sources = "\n".join(source_lines)
-    answer = f"{result.text}\n\nИсточники:\n{sources}"
-    await sender.send(chat_id, answer)
+    answer = f"{_esc(result.text)}\n\nИсточники:\n{sources}"
+    await sender.send(chat_id, answer, parse_mode="HTML")
 
 
 def smart_answer(user_id: int, chat_id: int, is_group_chat: bool, query_text: str) -> None:

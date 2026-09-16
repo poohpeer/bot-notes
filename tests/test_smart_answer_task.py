@@ -67,7 +67,7 @@ class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send(self, chat_id, text):
+    async def send(self, chat_id, text, *, parse_mode=None):
         self.sent.append((chat_id, text))
 
 
@@ -214,7 +214,8 @@ async def test_sources_include_extracted_places_as_maps_links(factory):
         sender=sender,
     )
     _, text = sender.sent[0]
-    assert "📍 Кахелеби — https://www.google.com/maps/search/" in text
+    assert '📍 <a href="https://www.google.com/maps/search/' in text
+    assert ">Кахелеби</a>" in text
 
 
 async def test_note_text_reaches_the_llm_only_as_data_not_the_system_prompt(factory):

@@ -5,6 +5,7 @@ docs/architecture/04-search.md, "Рендер выдачи".
 from __future__ import annotations
 
 from dataclasses import dataclass
+from html import escape as _esc
 from urllib.parse import quote
 
 _SOURCE_ICONS = {
@@ -98,11 +99,17 @@ def _google_maps_search_url(query: str) -> str:
 def render_places(structured: dict) -> list[str]:
     """`structured["places"]` — see enrich.py's `generate_places`: a
     youtube/instagram note's places, extracted from its caption/transcript.
-    One line per place, each a Google Maps search link built from whatever
-    text the LLM found — no guarantee it resolves to exactly the right
-    result, since the source text itself (often an ASR transcript) can
-    mangle a name or address (03-ingest.md notes this under "Места из
-    видео")."""
+    One line per place, the place's own name rendered as an HTML link
+    (`<a href="...">`) to a Google Maps search built from whatever text the
+    LLM found — no guarantee it resolves to exactly the right result, since
+    the source text itself (often an ASR transcript) can mangle a name or
+    address (03-ingest.md notes this under "Места из видео").
+
+    Callers MUST send the resulting text with parse_mode="HTML"
+    (aiogram's Message.answer/TelegramSender.send) — plain text would show
+    the raw `<a href=...>` markup instead of a link. `name` and the built
+    URL are both HTML-escaped here since either can hold arbitrary text
+    pulled from an ASR transcript or a caption."""
     places = structured.get("places") if isinstance(structured, dict) else None
     if not isinstance(places, list):
         return []
@@ -115,7 +122,8 @@ def render_places(structured: dict) -> list[str]:
             continue
         hint = place.get("location_hint")
         query = f"{name} {hint}" if isinstance(hint, str) and hint.strip() else name
-        lines.append(f"📍 {name} — {_google_maps_search_url(query)}")
+        url = _google_maps_search_url(query)
+        lines.append(f'📍 <a href="{_esc(url)}">{_esc(name)}</a>')
     return lines
 
 
@@ -133,20 +141,22 @@ def _heading_for(hit: RenderableHit) -> tuple[str, bool]:
 
 
 def render_search_card(hit: RenderableHit) -> str:
+    """Sent with parse_mode="HTML" (see render_places) — every dynamic
+    piece here is escaped for that reason, not just the places line."""
     icon = _SOURCE_ICONS.get(hit.source_type, "📝")
     heading, is_bare_url = _heading_for(hit)
-    lines = [f"{icon} {heading}"]
+    lines = [f"{icon} {_esc(heading)}"]
 
     if not is_bare_url:
         fragment = _truncate(hit.chunk_text.strip(), _FRAGMENT_MAX)
         if fragment and fragment != heading:
-            lines.append(fragment)
+            lines.append(_esc(fragment))
 
     if hit.tags:
-        lines.append(" ".join(f"#{t}" for t in hit.tags))
+        lines.append(" ".join(f"#{_esc(t)}" for t in hit.tags))
 
     if hit.source_url:
-        lines.append(hit.source_url)
+        lines.append(_esc(hit.source_url))
 
     lines.extend(render_places(hit.structured))
 

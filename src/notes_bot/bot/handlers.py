@@ -226,7 +226,7 @@ async def on_show_detail(callback: CallbackQuery, deps: Deps) -> None:
     if hit is None:
         await callback.message.answer(render_search_expired())
         return
-    await callback.message.answer(render_search_card(hit))
+    await callback.message.answer(render_search_card(hit), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("vis:"))
@@ -405,7 +405,7 @@ async def _send_notes_page(message: Message, page: NotesPage, *, is_trash: bool)
         return
     for hit in page.hits:
         keyboard = trash_item_keyboard(hit.note_id) if is_trash else list_item_keyboard(hit.note_id)
-        await message.answer(render_search_card(hit), reply_markup=keyboard)
+        await message.answer(render_search_card(hit), reply_markup=keyboard, parse_mode="HTML")
     if page.has_more:
         more_keyboard = (
             trash_more_keyboard(page.next_offset)

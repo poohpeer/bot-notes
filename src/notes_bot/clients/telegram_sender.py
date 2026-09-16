@@ -12,16 +12,16 @@ from aiogram import Bot
 
 
 class Sender(Protocol):
-    async def send(self, chat_id: int, text: str) -> None: ...
+    async def send(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> None: ...
 
 
 class TelegramSender:
     def __init__(self, bot_token: str) -> None:
         self._bot_token = bot_token
 
-    async def send(self, chat_id: int, text: str) -> None:
+    async def send(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> None:
         bot = Bot(token=self._bot_token)
         try:
-            await bot.send_message(chat_id, text)
+            await bot.send_message(chat_id, text, parse_mode=parse_mode)
         finally:
             await bot.session.close()

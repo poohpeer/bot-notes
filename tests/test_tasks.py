@@ -21,7 +21,7 @@ class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
 
-    async def send(self, chat_id, text):
+    async def send(self, chat_id, text, *, parse_mode=None):
         self.sent.append((chat_id, text))
 
 
