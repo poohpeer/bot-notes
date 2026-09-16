@@ -22,6 +22,9 @@ from notes_bot.bot.render import (
     render_search_debug_empty,
     render_search_expired,
     render_search_summary_card,
+    render_smart_answer_debug,
+    render_stage_timings,
+    render_token_usage,
     render_trash_empty,
 )
 
@@ -88,6 +91,68 @@ def test_debug_processing_done_truncates_a_long_fallback_preview():
 def test_debug_processing_done_omits_the_preview_line_when_both_are_empty():
     text = render_debug_processing_done(elapsed_s=1.0, summary=None, indexed_text="")
     assert text.splitlines() == ["⏱ Обработка завершена. Заняло: 1.0с"]
+
+
+def test_stage_timings_renders_only_present_stages_in_the_given_order():
+    lines = render_stage_timings(
+        ["extract", "chunk", "translate", "embed", "save"],
+        {"embed": 2.5, "extract": 8.123},
+    )
+    assert lines == ["  extract: 8.12с", "  embed: 2.50с"]
+
+
+def test_stage_timings_empty_when_nothing_measured():
+    assert render_stage_timings(["extract"], {}) == []
+
+
+def test_token_usage_none_when_both_counts_missing():
+    assert render_token_usage(None, None) is None
+
+
+def test_token_usage_renders_in_and_out():
+    assert render_token_usage(120, 45) == "🔤 Токены: вход 120, выход 45"
+
+
+def test_token_usage_renders_unknown_marker_for_a_missing_half():
+    assert render_token_usage(120, None) == "🔤 Токены: вход 120, выход ?"
+
+
+def test_debug_processing_done_includes_a_stage_breakdown_when_given():
+    text = render_debug_processing_done(
+        elapsed_s=12.3,
+        summary=None,
+        indexed_text="",
+        stage_timings={"extract": 8.0, "chunk": 0.01, "embed": 4.0},
+    )
+    lines = text.splitlines()
+    assert lines[0] == "⏱ Обработка завершена. Заняло: 12.3с"
+    assert "  extract: 8.00с" in lines
+    assert "  chunk: 0.01с" in lines
+    assert "  embed: 4.00с" in lines
+    # translate/save weren't measured this run — not shown as false zeros.
+    assert not any("translate" in line or "save" in line for line in lines)
+
+
+def test_smart_answer_debug_includes_stages_and_tokens():
+    text = render_smart_answer_debug(
+        elapsed_s=3.5,
+        stage_timings={"embed": 0.2, "search": 0.05, "llm": 3.1},
+        tokens_in=900,
+        tokens_out=120,
+    )
+    lines = text.splitlines()
+    assert lines[0] == "⏱ /smart_search: 3.5с"
+    assert "  embed: 0.20с" in lines
+    assert "  search: 0.05с" in lines
+    assert "  llm: 3.10с" in lines
+    assert "🔤 Токены: вход 900, выход 120" in lines
+
+
+def test_smart_answer_debug_omits_token_line_when_unavailable():
+    text = render_smart_answer_debug(
+        elapsed_s=1.0, stage_timings={"llm": 1.0}, tokens_in=None, tokens_out=None
+    )
+    assert "🔤" not in text
 
 
 def test_processing_failed_message():

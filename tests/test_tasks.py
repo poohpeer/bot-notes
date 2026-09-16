@@ -209,6 +209,29 @@ async def test_process_note_falls_back_to_original_text_when_translate_fails(fac
         assert note.status == "done"
 
 
+async def test_process_note_debug_notification_includes_translate_stage_when_used(factory):
+    note_id = await factory.insert_pending_text_note(text="привет мир")
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        translate_client=FakeTranslateClient(),
+        sender=sender,
+    )
+
+    _, text = sender.sent[0]
+    assert "translate:" in text
+
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+
 async def test_process_note_marks_failed_on_embedding_error(factory):
     note_id = await factory.insert_pending_text_note()
     client = FakeEmbeddingClient(fail=EmbeddingServiceError(503, "model not loaded"))
@@ -245,6 +268,13 @@ async def test_process_note_sends_debug_notification_when_enabled(factory):
     assert chat_id == 1
     assert "Обработка завершена" in text
     assert "hello world" in text  # preview of the indexed text
+    # per-stage breakdown (04-search.md/03-ingest.md's timing debug ask) —
+    # translate is absent (no translate_client passed), never shown as 0с.
+    assert "extract:" in text
+    assert "chunk:" in text
+    assert "embed:" in text
+    assert "save:" in text
+    assert "translate:" not in text
 
     # user_settings rows outlive this fixture's per-test cleanup (it only
     # tracks notes) — reset so a later test doesn't inherit user_id=1 stuck

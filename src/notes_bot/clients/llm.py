@@ -29,6 +29,32 @@ class LLMResult:
     usage: dict | None
 
 
+def extract_token_usage(usage: dict | None) -> tuple[int | None, int | None]:
+    """(tokens_in, tokens_out), best-effort — ai-proxy's `metadata` shape
+    (05-contracts.md, "Порт LLMClient") differs by provider. Verified live
+    against `claude_code`: `metadata.raw_envelope.usage.input_tokens`/
+    `.output_tokens` (plus separate cache_read/cache_creation counts this
+    doesn't surface — "input_tokens" alone can undercount when most of the
+    prompt was cache-served). `codex`'s CLI-based usage reporting wasn't
+    reachable to verify (every codex account was quota-exhausted when this
+    was written) and may not carry token counts at all — (None, None)
+    rather than a guessed 0, which would claim a real zero-token call."""
+    if not isinstance(usage, dict):
+        return None, None
+    envelope = usage.get("raw_envelope")
+    if not isinstance(envelope, dict):
+        return None, None
+    inner = envelope.get("usage")
+    if not isinstance(inner, dict):
+        return None, None
+    tokens_in = inner.get("input_tokens")
+    tokens_out = inner.get("output_tokens")
+    return (
+        tokens_in if isinstance(tokens_in, int) else None,
+        tokens_out if isinstance(tokens_out, int) else None,
+    )
+
+
 class LLMClient(Protocol):
     async def complete(
         self,

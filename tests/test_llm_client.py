@@ -11,6 +11,7 @@ from notes_bot.clients.llm import (
     LLMServiceError,
     NullLLMClient,
     ProxyAILLMClient,
+    extract_token_usage,
 )
 
 
@@ -220,3 +221,26 @@ async def test_connection_failure_raises_llm_service_error():
     with pytest.raises(LLMServiceError) as exc_info:
         await _client(handler).complete(system="s", user="u")
     assert exc_info.value.retryable is True
+
+
+def test_extract_token_usage_none_when_usage_is_none():
+    assert extract_token_usage(None) == (None, None)
+
+
+def test_extract_token_usage_none_when_raw_envelope_missing():
+    """codex's own usage reporting — unverified shape, see the function's
+    own docstring; this is the "codex" stand-in until it can be checked
+    live (every account was quota-exhausted when this was written)."""
+    assert extract_token_usage({"cost_usd": 0.01, "duration_ms": 500}) == (None, None)
+
+
+def test_extract_token_usage_reads_claude_code_raw_envelope():
+    """Shape verified against a live ai-proxy call with provider="claude_code"."""
+    usage = {
+        "cost_usd": 0.0,
+        "duration_ms": 2095,
+        "raw_envelope": {
+            "usage": {"input_tokens": 2, "output_tokens": 4, "cache_read_input_tokens": 15720}
+        },
+    }
+    assert extract_token_usage(usage) == (2, 4)

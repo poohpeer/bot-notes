@@ -58,8 +58,33 @@ def render_debug_toggle_confirmation(*, enabled: bool) -> str:
 _DEBUG_PREVIEW_MAX = 150
 
 
+def render_stage_timings(stage_order: list[str], stages: dict[str, float]) -> list[str]:
+    """One line per stage in `stage_order` that's actually present in
+    `stages` (a stage skipped this run - e.g. translate when
+    TRANSLATE_ENABLED=false - has no entry and is silently omitted, not
+    shown as 0.0с, which would misleadingly claim it ran instantly)."""
+    return [f"  {name}: {stages[name]:.2f}с" for name in stage_order if name in stages]
+
+
+def render_token_usage(tokens_in: int | None, tokens_out: int | None) -> str | None:
+    """`None` when ai-proxy's response didn't carry token counts at all -
+    happens for `codex` (CLI-provider usage reporting differs from
+    claude_code's SDK-style envelope; ProxyAILLMClient.complete's own
+    extraction is best-effort, see clients/llm.py) - a debug line saying
+    "вход 0, выход 0" would misleadingly claim a real zero-token call."""
+    if tokens_in is None and tokens_out is None:
+        return None
+    tin = tokens_in if tokens_in is not None else "?"
+    tout = tokens_out if tokens_out is not None else "?"
+    return f"🔤 Токены: вход {tin}, выход {tout}"
+
+
 def render_debug_processing_done(
-    *, elapsed_s: float, summary: str | None, indexed_text: str
+    *,
+    elapsed_s: float,
+    summary: str | None,
+    indexed_text: str,
+    stage_timings: dict[str, float] | None = None,
 ) -> str:
     """Sent by process_note itself once a note is fully processed, when the
     owner has /debug on — see 03-ingest.md, "Debug: время обработки". The
@@ -70,11 +95,39 @@ def render_debug_processing_done(
     when one's available. Falls back to a plain truncated excerpt of
     `indexed_text` when it isn't (LLM_ENABLED=false, or the summary call
     itself failed) — still enough to confirm real content got indexed
-    rather than, say, a silently degraded extraction leaving only the URL."""
+    rather than, say, a silently degraded extraction leaving only the URL.
+
+    `stage_timings` breaks the total down by stage (extract/chunk/
+    translate/embed/save) - added because "12.3с" alone doesn't say whether
+    that was ASR transcription or a slow translate/embed call."""
     lines = [f"⏱ Обработка завершена. Заняло: {elapsed_s:.1f}с"]
+    if stage_timings:
+        lines.extend(
+            render_stage_timings(["extract", "chunk", "translate", "embed", "save"], stage_timings)
+        )
     preview = summary.strip() if summary else _truncate(indexed_text, _DEBUG_PREVIEW_MAX)
     if preview:
         lines.append(preview)
+    return "\n".join(lines)
+
+
+def render_smart_answer_debug(
+    *,
+    elapsed_s: float,
+    stage_timings: dict[str, float],
+    tokens_in: int | None,
+    tokens_out: int | None,
+) -> str:
+    """Sent as a follow-up message after /smart_search's own answer, when
+    the owner has /debug on (03-ingest.md's /debug flag, reused here rather
+    than a second toggle) - see 04-search.md, "Debug: тайминги
+    /smart_search". Answers "почему это заняло N секунд и что съело квоту"
+    without grepping worker logs."""
+    lines = [f"⏱ /smart_search: {elapsed_s:.1f}с"]
+    lines.extend(render_stage_timings(["translate", "embed", "search", "llm"], stage_timings))
+    usage_line = render_token_usage(tokens_in, tokens_out)
+    if usage_line:
+        lines.append(usage_line)
     return "\n".join(lines)
 
 

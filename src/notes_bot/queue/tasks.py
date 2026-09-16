@@ -33,11 +33,18 @@ from notes_bot.bot.render import (
     render_debug_processing_done,
     render_places,
     render_processing_failed,
+    render_smart_answer_debug,
     render_smart_answer_failed,
 )
 from notes_bot.clients.alerts import AlertNotifier, NullNotifier, build_notifier
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
-from notes_bot.clients.llm import LLMClient, LLMServiceError, NullLLMClient, ProxyAILLMClient
+from notes_bot.clients.llm import (
+    LLMClient,
+    LLMServiceError,
+    NullLLMClient,
+    ProxyAILLMClient,
+    extract_token_usage,
+)
 from notes_bot.clients.prompts import load_prompt
 from notes_bot.clients.telegram_files import TelegramFileClient
 from notes_bot.clients.telegram_sender import Sender, TelegramSender
@@ -220,9 +227,18 @@ async def process_note_async(
         chat_id = note.chat_id
 
         started = time.perf_counter()
+        # /debug's per-stage breakdown (render_debug_processing_done) — a
+        # stage that's skipped this run (translate, when disabled or never
+        # attempted) simply gets no entry, see render_stage_timings.
+        stage_timings: dict[str, float] = {}
         try:
+            stage_started = time.perf_counter()
             text = await _extract_and_get_index_text(note, note_repo, extractors)
+            stage_timings["extract"] = time.perf_counter() - stage_started
+
+            stage_started = time.perf_counter()
             chunks = chunk(text)
+            stage_timings["chunk"] = time.perf_counter() - stage_started
             if not chunks:
                 # Only reached with nothing left to index at all — not even
                 # raw_text/the URL. This IS a real failure: the note is
@@ -238,6 +254,7 @@ async def process_note_async(
                 # untranslated text. Best-effort: a down/slow translate
                 # service must not fail note processing, only fall back to
                 # the old same-language-only search behavior for this note.
+                stage_started = time.perf_counter()
                 try:
                     texts_to_embed = await translate_client.translate_passages(texts_to_embed)
                 except TranslateServiceError as exc:
@@ -246,15 +263,20 @@ async def process_note_async(
                         note_id,
                         exc,
                     )
+                stage_timings["translate"] = time.perf_counter() - stage_started
 
+            stage_started = time.perf_counter()
             vectors = await embedding_client.embed_passages(texts_to_embed)
+            stage_timings["embed"] = time.perf_counter() - stage_started
             new_chunks = ChunkRepository.from_domain_chunks(chunks, vectors)
 
+            stage_started = time.perf_counter()
             await chunk_repo.replace_chunks(
                 note_id, new_chunks, embedding_model=embedding_client.model_name
             )
             await note_repo.mark_done(note_id)
             await session.commit()
+            stage_timings["save"] = time.perf_counter() - stage_started
             log.info("process_note: note_id=%s done, chunks=%d", note_id, len(new_chunks))
 
             if sender is not None:
@@ -283,7 +305,10 @@ async def process_note_async(
                     await sender.send(
                         chat_id,
                         render_debug_processing_done(
-                            elapsed_s=elapsed_s, summary=summary, indexed_text=text
+                            elapsed_s=elapsed_s,
+                            summary=summary,
+                            indexed_text=text,
+                            stage_timings=stage_timings,
                         ),
                     )
 
@@ -549,11 +574,20 @@ async def smart_answer_async(
         log.info("smart_answer: user_id=%s LLM disabled, skipping", user_id)
         return
 
+    # /debug (03-ingest.md's flag, reused — see render_smart_answer_debug):
+    # a per-stage breakdown of where this run's time went, plus token usage
+    # when ai-proxy's response carries it. A stage that never ran (translate,
+    # when disabled) has no entry — see render_stage_timings.
+    started = time.perf_counter()
+    stage_timings: dict[str, float] = {}
+
     async with session_factory() as session:
         search_mode = "all"
+        debug_enabled = False
         if not is_group_chat:
             settings_row = await UserSettingsRepository(session).get_or_create(user_id)
             search_mode = settings_row.search_mode
+            debug_enabled = await UserSettingsRepository(session).is_debug_enabled(user_id)
 
         embed_text = query_text
         if translate_client is not None:
@@ -565,21 +599,26 @@ async def smart_answer_async(
             # independently of the handler's earlier "any hits at all?"
             # check). Best-effort: a down translate service falls back to
             # embedding the original query, not a failed answer.
+            stage_started = time.perf_counter()
             try:
                 embed_text = await translate_client.translate_query(query_text)
             except TranslateServiceError as exc:
                 log.warning("smart_answer: user_id=%s translate failed: %s", user_id, exc)
+            stage_timings["translate"] = time.perf_counter() - stage_started
 
+        stage_started = time.perf_counter()
         try:
             query_vector = await embedding_client.embed_query(embed_text)
         except EmbeddingServiceError as exc:
             log.warning("smart_answer: user_id=%s embedding failed: %s", user_id, exc)
             await sender.send(chat_id, render_smart_answer_failed())
             return
+        stage_timings["embed"] = time.perf_counter() - stage_started
 
         predicate = visibility_predicate(
             user_id=user_id, chat_id=chat_id, is_group_chat=is_group_chat, search_mode=search_mode
         )
+        stage_started = time.perf_counter()
         hits = await search_notes(
             session,
             query_vector=query_vector,
@@ -590,6 +629,7 @@ async def smart_answer_async(
             offset=0,
             max_distance=max_distance,
         )
+        stage_timings["search"] = time.perf_counter() - stage_started
 
     if not hits:
         log.info("smart_answer: user_id=%s no matching notes, skipping", user_id)
@@ -600,6 +640,7 @@ async def smart_answer_async(
     )
     user_prompt = f"Вопрос: {query_text}\n\nЗаметки:\n{context_block}"
 
+    stage_started = time.perf_counter()
     try:
         result = await llm_client.complete(
             system=load_prompt("rag_answer"), user=user_prompt, timeout_s=timeout_s
@@ -613,6 +654,7 @@ async def smart_answer_async(
         )
         await sender.send(chat_id, render_smart_answer_failed())
         return
+    stage_timings["llm"] = time.perf_counter() - stage_started
 
     if not result.text:
         log.info("smart_answer: user_id=%s empty synthesis, skipping", user_id)
@@ -637,6 +679,18 @@ async def smart_answer_async(
     sources = "\n".join(source_lines)
     answer = f"{_esc(result.text)}\n\nИсточники:\n{sources}"
     await sender.send(chat_id, answer, parse_mode="HTML")
+
+    if debug_enabled:
+        tokens_in, tokens_out = extract_token_usage(result.usage)
+        await sender.send(
+            chat_id,
+            render_smart_answer_debug(
+                elapsed_s=time.perf_counter() - started,
+                stage_timings=stage_timings,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+            ),
+        )
 
 
 def smart_answer(user_id: int, chat_id: int, is_group_chat: bool, query_text: str) -> None:

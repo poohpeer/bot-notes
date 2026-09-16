@@ -8,6 +8,7 @@ from notes_bot.clients.embeddings import EmbeddingServiceError
 from notes_bot.clients.llm import LLMResult, LLMServiceError
 from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.db.models import Note, NoteChunk
+from notes_bot.db.repositories import UserSettingsRepository
 from notes_bot.queue.tasks import smart_answer_async
 
 pytestmark = pytest.mark.asyncio
@@ -51,16 +52,17 @@ class FakeTranslateClient:
 
 
 class ScriptedLLMClient:
-    def __init__(self, text="", fail_with=None):
+    def __init__(self, text="", fail_with=None, usage=None):
         self._text = text
         self._fail_with = fail_with
+        self._usage = usage
         self.calls: list[dict] = []
 
     async def complete(self, *, system, user, json_schema=None, history=None, timeout_s=60.0):
         self.calls.append({"system": system, "user": user})
         if self._fail_with:
             raise self._fail_with
-        return LLMResult(text=self._text, parsed=None, model="scripted", usage=None)
+        return LLMResult(text=self._text, parsed=None, model="scripted", usage=self._usage)
 
 
 class FakeSender:
@@ -386,3 +388,65 @@ async def test_falls_back_to_the_original_query_when_translate_fails(factory):
     )
     assert embedding_client.query_calls == ["q"]
     assert sender.sent[0][0] == 1
+
+
+async def test_no_debug_message_when_debug_off(factory):
+    await factory.insert_done_note()
+    llm = ScriptedLLMClient(text="an answer")
+    sender = FakeSender()
+
+    await smart_answer_async(
+        user_id=1,
+        chat_id=1,
+        is_group_chat=False,
+        query_text="q",
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        llm_client=llm,
+        llm_enabled=True,
+        timeout_s=10,
+        sender=sender,
+    )
+    # Just the one answer message — no follow-up debug/timing message.
+    assert len(sender.sent) == 1
+
+
+async def test_debug_message_includes_stage_timings_and_tokens_when_debug_on(factory):
+    """04-search.md, "Debug: тайминги /smart_search"."""
+    await factory.insert_done_note()
+    usage = {
+        "cost_usd": 0.0,
+        "duration_ms": 500,
+        "raw_envelope": {"usage": {"input_tokens": 900, "output_tokens": 120}},
+    }
+    llm = ScriptedLLMClient(text="an answer", usage=usage)
+    sender = FakeSender()
+
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+    await smart_answer_async(
+        user_id=1,
+        chat_id=1,
+        is_group_chat=False,
+        query_text="q",
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        llm_client=llm,
+        llm_enabled=True,
+        timeout_s=10,
+        sender=sender,
+    )
+
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+    assert len(sender.sent) == 2
+    _, debug_text = sender.sent[1]
+    assert "⏱ /smart_search:" in debug_text
+    assert "embed:" in debug_text
+    assert "search:" in debug_text
+    assert "llm:" in debug_text
+    assert "🔤 Токены: вход 900, выход 120" in debug_text
