@@ -30,6 +30,18 @@ class Settings(BaseSettings):
 
     # Defaulted.
     embedding_dim: int = Field(default=768, alias="EMBEDDING_DIM")
+    # notes-translate — see 05-contracts.md, "Translate-сервис": both a
+    # note's text (at index time) and a search query are translated to
+    # translate_target_lang before embedding, so cross-lingual notes/queries
+    # (measured: Hebrew query vs. Hebrew note 0.137, same query vs. a
+    # Russian note 0.247) compare on equal footing. TRANSLATE_ENABLED=false
+    # (e.g. before this service is deployed, or if it's unhealthy for a
+    # while) falls back to embedding the original text/query untranslated —
+    # the old, worse-but-working cross-lingual behavior, not a hard failure.
+    translate_enabled: bool = Field(default=True, alias="TRANSLATE_ENABLED")
+    translate_url: str = Field(default="http://notes-translate:8000", alias="TRANSLATE_URL")
+    translate_target_lang: str = Field(default="eng_Latn", alias="TRANSLATE_TARGET_LANG")
+    translate_timeout_s: float = Field(default=20.0, alias="TRANSLATE_TIMEOUT_S")
     proxy_ai_url: str = Field(default="http://ai-proxy:8787", alias="PROXY_AI_URL")
     llm_enabled: bool = Field(default=False, alias="LLM_ENABLED")
     llm_enrich_timeout_s: float = Field(default=120.0, alias="LLM_ENRICH_TIMEOUT_S")

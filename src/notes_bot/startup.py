@@ -28,6 +28,7 @@ async def validate_startup(settings: Settings, engine: AsyncEngine) -> None:
     await _check_database(engine)
     await _check_redis(settings)
     await _check_embedding_dim(settings)
+    await _check_translate_reachable(settings)
 
 
 async def _check_database(engine: AsyncEngine) -> None:
@@ -65,3 +66,27 @@ async def _check_embedding_dim(settings: Settings) -> None:
             f"EMBEDDING_DIM={settings.embedding_dim} does not match "
             f"embedding service's dim={remote_dim}"
         )
+
+
+async def _check_translate_reachable(settings: Settings) -> None:
+    """Deliberately does not raise, unlike the checks above — notes-translate
+    is a search-quality improvement (05-contracts.md, "Translate-сервис"),
+    not a requirement to save or search notes at all (queue/tasks.py and
+    bot/logic.py both fall back to embedding untranslated text on any
+    failure here). Only logs, so a deploy where the NLLB image is still
+    pulling doesn't crash-loop the bot over an optional dependency — but the
+    log line still exists for the same "real proof" reason
+    _check_embedding_dim's does, see 06-deployment.md's deploy verification
+    step."""
+    if not settings.translate_enabled:
+        log.info("translate service: disabled (TRANSLATE_ENABLED=false)")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{settings.translate_url}/model")
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+        log.warning("translate service unreachable at startup: %s", exc)
+        return
+    log.info("translate service reachable: model=%s", data.get("name"))

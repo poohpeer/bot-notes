@@ -25,6 +25,7 @@ from notes_bot.bot.logic import (
     toggle_privacy,
 )
 from notes_bot.clients.search_cache import SearchSessionCache
+from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import ChatSettingsRepository, UserSettingsRepository
@@ -45,6 +46,34 @@ class FakeEmbeddingClient:
         # Deterministic: same query text always maps to the same vector,
         # letting tests control ranking via note embeddings.
         return [1.0, 0.0] + [0.0] * 766
+
+
+class RecordingEmbeddingClient(FakeEmbeddingClient):
+    """Same fixed vector as FakeEmbeddingClient (ranking isn't the point
+    here), but records what text embed_query actually received — that's
+    what the translate-before-embed tests below assert on."""
+
+    def __init__(self) -> None:
+        self.query_calls: list[str] = []
+
+    async def embed_query(self, text):
+        self.query_calls.append(text)
+        return await super().embed_query(text)
+
+
+class FakeTranslateClient:
+    def __init__(self, fail_with: Exception | None = None) -> None:
+        self._fail_with = fail_with
+        self.query_calls: list[str] = []
+
+    async def translate_passages(self, texts):
+        raise NotImplementedError
+
+    async def translate_query(self, text: str) -> str:
+        self.query_calls.append(text)
+        if self._fail_with:
+            raise self._fail_with
+        return f"[en] {text}"
 
 
 class FakeQueue:
@@ -477,6 +506,58 @@ async def test_run_search_with_no_matching_notes_returns_empty(deps):
     assert page.has_more is False
     assert page.session_id is None
     assert page.debug_info is None
+
+
+async def test_run_search_embeds_the_translated_query_when_translate_client_set(
+    db_engine, redis_client
+):
+    """04-search.md, "Перевод перед эмбеддингом": the vector must come from
+    the translated query text, not the original."""
+    await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    embedding_client = RecordingEmbeddingClient()
+    translate_client = FakeTranslateClient()
+    deps = Deps(
+        session_factory=session_factory,
+        embedding_client=embedding_client,
+        search_cache=SearchSessionCache(redis_client),
+        fast_queue=FakeQueue(),
+        heavy_queue=FakeQueue(),
+        llm_queue=FakeQueue(),
+        settings=_settings(),
+        translate_client=translate_client,
+    )
+
+    await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="где велодорожки")
+
+    assert translate_client.query_calls == ["где велодорожки"]
+    assert embedding_client.query_calls == ["[en] где велодорожки"]
+
+
+async def test_run_search_falls_back_to_the_original_query_when_translate_fails(
+    db_engine, redis_client
+):
+    """Best-effort: a down translate service must not fail the search, only
+    degrade to the old same-language-only behavior."""
+    await _add_note_with_chunk(db_engine, x=0.99, y=0.01)
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    embedding_client = RecordingEmbeddingClient()
+    translate_client = FakeTranslateClient(fail_with=TranslateServiceError(503, "down"))
+    deps = Deps(
+        session_factory=session_factory,
+        embedding_client=embedding_client,
+        search_cache=SearchSessionCache(redis_client),
+        fast_queue=FakeQueue(),
+        heavy_queue=FakeQueue(),
+        llm_queue=FakeQueue(),
+        settings=_settings(),
+        translate_client=translate_client,
+    )
+
+    page = await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
+
+    assert embedding_client.query_calls == ["q"]
+    assert len(page.hits) == 1
 
 
 async def test_run_search_debug_info_when_relevance_filtered_and_debug_on(db_engine, redis_client):

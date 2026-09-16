@@ -1,0 +1,98 @@
+# notes-translate — see docs/architecture/06-deployment.md and
+# 05-contracts.md. Scaled by replica, never by process (workers=1 in the
+# image's uvicorn command) — several processes would mean several copies of
+# the ~2.5GB NLLB-200-distilled-600M model in one pod.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-translate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notes-translate
+  template:
+    metadata:
+      labels:
+        app: notes-translate
+    spec:
+      imagePullSecrets:
+        - name: notes-bot-ghcr-pull-secret
+      containers:
+        - name: translate
+          image: ghcr.io/poohpeer/bot-notes-translate:latest
+          # Same reasoning as notes-embeddings' own env block: pin the
+          # thread pool to the CPU limit below, or PyTorch oversubscribes
+          # against the host's full core count instead of the cgroup limit.
+          env:
+            - name: OMP_NUM_THREADS
+              value: "3"
+            - name: MKL_NUM_THREADS
+              value: "3"
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1536Mi
+            limits:
+              # 600M params (vs e5-base's ~280M) plus seq2seq generation
+              # (multiple forward passes per translation, not one encode) —
+              # more CPU-bound per call than embeddings' own /embed.
+              cpu: 3000m
+              memory: 3Gi
+          # Loading NLLB's weights from disk takes tens of seconds; same
+          # startupProbe pattern as notes-embeddings.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes-translate
+spec:
+  selector:
+    app: notes-translate
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# Only the bot and the workers may reach it — same policy as
+# notes-embeddings, see 06-deployment.md, "Секреты и сеть".
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notes-translate-allow-app-only
+spec:
+  podSelector:
+    matchLabels:
+      app: notes-translate
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: notes-bot
+        - podSelector:
+            matchLabels:
+              app: notes-worker-fast
+        - podSelector:
+            matchLabels:
+              app: notes-worker-heavy
+      ports:
+        - port: 8000

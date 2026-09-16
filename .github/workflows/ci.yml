@@ -94,6 +94,24 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pytest -q
 
+  test-translate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/translate
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - run: uv sync
+
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
   build:
     needs: test
     if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.test.result != 'failure' }}
@@ -173,14 +191,47 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  build-translate:
+    needs: test-translate
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.test-translate.result != 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Separate image, separate context — same reasoning as
+      # build-embeddings: this Dockerfile bakes NLLB-200-distilled-600M's
+      # weights (~2.5GB) into the layer at build time.
+      - uses: docker/build-push-action@v7
+        with:
+          context: services/translate
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}-translate:v${{ github.run_number }}
+            ${{ env.IMAGE_NAME }}-translate:latest
+            ${{ env.IMAGE_NAME }}-translate:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
-    # Behind both build jobs, through build and build-embeddings. Mirrors
-    # bot-organizer's deploy job (same self-hosted runner, "Living Room Media
-    # PC" — registered separately for this repo under
-    # C:\Users\User\actions-runner-bot-notes, see its own README for how that
-    # was set up), adapted for three image families instead of one.
-    needs: [build, build-embeddings]
-    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.build.result == 'success' && needs.build-embeddings.result == 'success' }}
+    # Behind all three build jobs. Mirrors bot-organizer's deploy job (same
+    # self-hosted runner, "Living Room Media PC" — registered separately for
+    # this repo under C:\Users\User\actions-runner-bot-notes, see its own
+    # README for how that was set up), adapted for four image families
+    # instead of one.
+    needs: [build, build-embeddings, build-translate]
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.build.result == 'success' && needs.build-embeddings.result == 'success' && needs.build-translate.result == 'success' }}
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v5
@@ -197,7 +248,7 @@ jobs:
           kubectl cluster-info
           if ($LASTEXITCODE -ne 0) { throw "No reachable cluster for the runner user." }
           Write-Host "--- our resources ---"
-          kubectl get deployment notes-bot notes-worker-fast notes-worker-heavy notes-embeddings notes-bot-redis
+          kubectl get deployment notes-bot notes-worker-fast notes-worker-heavy notes-embeddings notes-translate notes-bot-redis
           kubectl get secret notes-bot-secrets notes-bot-ghcr-pull-secret
           Write-Host "--- verdict ---"
           kubectl get deployment notes-bot | Out-Null
@@ -228,6 +279,7 @@ jobs:
           $app = "ghcr.io/poohpeer/bot-notes-app"
           $appHeavy = "ghcr.io/poohpeer/bot-notes-app-heavy"
           $embeddings = "ghcr.io/poohpeer/bot-notes-embeddings"
+          $translate = "ghcr.io/poohpeer/bot-notes-translate"
 
           Pin-Image "deploy/k8s/app.yaml" $app
           Pin-Image "deploy/k8s/migrate-job.yaml" $app
@@ -235,6 +287,7 @@ jobs:
           Pin-Image "deploy/k8s/gc-reclaim.yaml" $app
           Pin-Image "deploy/k8s/worker-heavy.yaml" $appHeavy
           Pin-Image "deploy/k8s/embeddings.yaml" $embeddings
+          Pin-Image "deploy/k8s/translate.yaml" $translate
 
       # A Job's spec is immutable once created (deploy/k8s/migrate-job.yaml's
       # own docstring) — re-applying a pinned image on top of a Job that
@@ -274,6 +327,11 @@ jobs:
         run: |
           kubectl rollout status deployment/notes-embeddings --timeout=900s
           if ($LASTEXITCODE -ne 0) { throw "notes-embeddings rollout did not complete" }
+          # NLLB-200-distilled-600M's baked-in image is comparable in size
+          # to embeddings' own (~2.5GB vs ~1GB) — same generous budget for
+          # the same homelab-uplink-contention reason noted above.
+          kubectl rollout status deployment/notes-translate --timeout=900s
+          if ($LASTEXITCODE -ne 0) { throw "notes-translate rollout did not complete" }
           kubectl rollout status deployment/notes-bot --timeout=600s
           if ($LASTEXITCODE -ne 0) { throw "notes-bot rollout did not complete" }
           kubectl rollout status deployment/notes-worker-fast --timeout=600s
@@ -294,6 +352,7 @@ jobs:
           $fastLog = kubectl logs deployment/notes-worker-fast --tail=50 2>&1 | Out-String
           $heavyLog = kubectl logs deployment/notes-worker-heavy --tail=50 2>&1 | Out-String
           $embLog = kubectl logs deployment/notes-embeddings --tail=50 2>&1 | Out-String
+          $translateLog = kubectl logs deployment/notes-translate --tail=50 2>&1 | Out-String
 
           Write-Host "--- notes-bot ---"
           Write-Host $botLog
@@ -303,6 +362,8 @@ jobs:
           Write-Host $heavyLog
           Write-Host "--- notes-embeddings ---"
           Write-Host $embLog
+          Write-Host "--- notes-translate ---"
+          Write-Host $translateLog
 
           if ($botLog -notmatch 'notes-bot starting up as @') {
             throw "the bot never reached Telegram: no 'notes-bot starting up as @' line."
@@ -327,6 +388,13 @@ jobs:
           if ($botLog -notmatch 'notes-embeddings:8000/model.*200 OK') {
             throw "notes-bot never got a working response from notes-embeddings at startup."
           }
+          # Not a hard failure: notes-translate is a search-quality
+          # improvement (05-contracts.md, "Translate-сервис"), not a
+          # requirement — startup.py's own check logs and moves on rather
+          # than crashing, so this step only warns too, same severity.
+          if ($botLog -notmatch 'translate service reachable: model=') {
+            Write-Warning "notes-bot did not confirm notes-translate at startup (non-fatal — translation degrades to untranslated text/queries)."
+          }
           Write-Host "all four processes are up"
 
           Write-Host "--- running images ---"
@@ -335,6 +403,8 @@ jobs:
           kubectl get deployment notes-worker-heavy -o "jsonpath={.spec.template.spec.containers[0].image}"
           Write-Host ""
           kubectl get deployment notes-embeddings -o "jsonpath={.spec.template.spec.containers[0].image}"
+          Write-Host ""
+          kubectl get deployment notes-translate -o "jsonpath={.spec.template.spec.containers[0].image}"
           Write-Host ""
 
       # Housekeeping, never a reason to fail a deploy that worked — hence
@@ -354,7 +424,8 @@ jobs:
             $repos = @(
               "ghcr.io/poohpeer/bot-notes-app",
               "ghcr.io/poohpeer/bot-notes-app-heavy",
-              "ghcr.io/poohpeer/bot-notes-embeddings"
+              "ghcr.io/poohpeer/bot-notes-embeddings",
+              "ghcr.io/poohpeer/bot-notes-translate"
             )
 
             $images = docker exec $node crictl images -o json | ConvertFrom-Json
@@ -405,7 +476,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        package: [bot-notes-app, bot-notes-app-heavy, bot-notes-embeddings]
+        package: [bot-notes-app, bot-notes-app-heavy, bot-notes-embeddings, bot-notes-translate]
     steps:
       # Same script as bot-organizer's, parameterized by package — this repo
       # has three GHCR packages instead of one, and each needs its own

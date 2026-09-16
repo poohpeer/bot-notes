@@ -83,6 +83,82 @@
   старте означает зависимость холодного старта от внешней сети и риск
   упереться в лимиты хаба.
 
+## Translate-сервис
+
+Отдельный сервис, отдельная модель (NLLB-200-distilled-600M) - та же
+причина разделения, что и у embedding-сервиса: всё специфичное для
+конкретной модели перевода (коды языков FLORES-200, детекция языка,
+батчинг по языку) живёт здесь, вызывающий код оперирует только «текст +
+целевой язык».
+
+Появился из-за измеренной проблемы: multilingual-e5 сравнивает эмбеддинги
+кросс-язычно заметно хуже, чем внутри одного языка - один и тот же запрос
+на иврите к заметке на иврите давал distance 0.137, а к заметке на русском
+(после перевода обеих сторон на общий язык для сравнения) - 0.247, то есть
+без перевода релевантная, но иноязычная заметка нередко не проходит
+`SEARCH_MAX_DISTANCE`. См. `04-search.md`, "Перевод перед эмбеддингом".
+
+### POST /translate
+
+```jsonc
+// Запрос
+{
+  "texts": ["где покататься на велике в тель авиве", "..."],
+  "target_lang": "eng_Latn"   // опционально, иначе TRANSLATE_DEFAULT_TARGET_LANG
+}
+
+// Ответ 200
+{
+  "model": "facebook/nllb-200-distilled-600M",
+  "items": [
+    {"text": "where to ride a bike in tel aviv", "source_lang": "ru", "translated": true}
+  ]
+}
+```
+
+Каждый элемент `texts` детектируется независимо (py3langid, ISO 639-1) и
+переводится только если его язык не совпадает с целевым и попадает в
+таблицу известных языков сервиса - иначе `translated: false` и текст
+возвращается как есть. Не ошибка: тот же принцип деградации, что у
+экстракторов в `03-ingest.md` - лучше вернуть исходный текст, чем упасть
+или угадать код языка неверно.
+
+Ошибки: тот же набор кодов, что у embedding-сервиса (400/413/429/503) - см.
+таблицу выше, смысл идентичен.
+
+### GET /model
+
+```jsonc
+{"name": "facebook/nllb-200-distilled-600M", "default_target_lang": "eng_Latn"}
+```
+
+### GET /healthz, GET /readyz
+
+Как у embedding-сервиса.
+
+### Внутреннее устройство
+
+Совпадает с embedding-сервисом (один uvicorn-процесс, масштабирование
+репликами, веса запечены в образ) с одним отличием: NLLB - seq2seq-модель
+(`model.generate`, несколько forward pass на текст, а не один encode), в
+разы дороже по CPU на единицу текста, чем e5's encode - отсюда более
+высокий `resources.limits.cpu` в `deploy/k8s/translate.yaml`.
+
+### Клиент в notes-bot и деградация
+
+`HttpTranslateClient` (`clients/translate.py`) вызывается из двух мест:
+`process_note_async` (текст заметки, перед `embed_passages`) и `run_search`
+(поисковый запрос, перед `embed_query`). В обоих местах вызов
+best-effort - `TranslateServiceError` перехватывается и логируется, а
+эмбеддинг считается по исходному, непереведённому тексту. `chunk_text` в
+БД (то, что видит пользователь в карточке) - всегда исходный, непереведённый
+текст независимо от исхода перевода; переводу подвергается только то, что
+уходит в `embed_passages`/`embed_query`.
+
+`TRANSLATE_ENABLED=false` отключает вызовы целиком (`translate_client=None`)
+- то же поведение, что при недоступном сервисе, только без сетевого вызова
+и без записи в лог на каждую заметку/поиск.
+
 ## ai-proxy
 
 Контракт зафиксирован по репозиторию `poohpeer/ai-proxy` (README на коммите
@@ -272,6 +348,11 @@ class EmbeddingClient(Protocol):
     @property
     def dim(self) -> int: ...
 
+# Перевод перед эмбеддингом - см. "Translate-сервис" выше
+class TranslateClient(Protocol):
+    async def translate_passages(self, texts: list[str]) -> list[str]: ...
+    async def translate_query(self, text: str) -> str: ...
+
 # Чанкинг - чистая функция, без ввода-вывода
 def chunk(text: str, *, tokenizer, target: int, overlap: int, min_size: int,
           max_chunks: int) -> list[Chunk]: ...
@@ -294,6 +375,10 @@ def visibility_predicate(*, user_id: int, chat_id: int, is_group_chat: bool,
 | `EMBEDDINGS_URL` | `http://notes-embeddings:8000` | ConfigMap |
 | `EMBEDDING_DIM` | `768` | ConfigMap |
 | `EMBEDDING_MODEL_NAME` | `intfloat/multilingual-e5-base` | ConfigMap |
+| `TRANSLATE_ENABLED` | `true` | ConfigMap |
+| `TRANSLATE_URL` | `http://notes-translate:8000` | ConfigMap |
+| `TRANSLATE_TARGET_LANG` | `eng_Latn` | ConfigMap |
+| `TRANSLATE_TIMEOUT_S` | `20` | ConfigMap |
 | `PROXY_AI_URL` | `http://ai-proxy:8787` | ConfigMap |
 | `LLM_ENABLED` | `false` до фикса песочницы в ai-proxy (ADR-14) | ConfigMap |
 | `LLM_ENRICH_TIMEOUT_S` | `120` | ConfigMap |

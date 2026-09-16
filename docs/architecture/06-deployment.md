@@ -7,6 +7,7 @@
 | `notes-app` | Python, aiogram, SQLAlchemy, RQ, trafilatura, httpx, yt-dlp, youtube-transcript-api | ~450 МБ |
 | `notes-app-heavy` | `notes-app` + ffmpeg, faster-whisper, веса `small` | ~1.5 ГБ |
 | `notes-embeddings` | FastAPI, sentence-transformers, torch CPU, веса модели | ~2.5 ГБ |
+| `notes-translate` | FastAPI, transformers, torch CPU, py3langid, веса NLLB-200-distilled-600M | ~3 ГБ |
 
 Размеры - оценка порядка величины, это моё предположение; точные цифры
 будут известны после первой сборки.
@@ -37,6 +38,7 @@
 | `notes-worker-fast` | Deployment | 1-2 | 200m / 512Mi | 1 / 1Gi |
 | `notes-worker-heavy` | Deployment | 1 | 500m / 1.5Gi | 2 / 3Gi |
 | `notes-embeddings` | Deployment + Service | 1-2 | 500m / 1Gi | 1500m / 2.5Gi |
+| `notes-translate` | Deployment + Service | 1 | 500m / 1.5Gi | 3000m / 3Gi |
 | `notes-gc` | CronJob, `0 3 * * *` | - | 100m / 256Mi | 500m / 512Mi |
 | `notes-migrate` | Job, руками или в пайплайне | - | 100m / 256Mi | 500m / 512Mi |
 
@@ -78,6 +80,7 @@ Long polling через `getUpdates` не допускает двух однов
 | `notes-bot` | HTTP `/healthz` на служебном порту | тот же, плюс успешный `getMe` |
 | воркеры | наличие процесса и свежий heartbeat в Redis | - |
 | `notes-embeddings` | `/healthz` | `/readyz` - только после прогрева модели |
+| `notes-translate` | `/healthz` | `/readyz` - только после прогрева модели |
 
 У embedding-сервиса `readinessProbe` обязана иметь запас по
 `initialDelaySeconds` и `failureThreshold`: загрузка модели с диска занимает
@@ -104,8 +107,11 @@ Long polling через `getUpdates` не допускает двух однов
 - Отдельная роль в Postgres для этого бота, отдельная схема или как минимум
   отдельные права. База общая с family-bot, и права не должны пересекаться.
 - Отдельный номер базы Redis, чтобы ключи не конфликтовали с существующими.
-- NetworkPolicy: `notes-embeddings` принимает трафик только от подов бота и
-  воркеров, наружу не выставляется.
+- NetworkPolicy: `notes-embeddings` и `notes-translate` принимают трафик
+  только от подов бота и воркеров, наружу не выставляются. Вызов
+  notes-translate - лучше-эффорт (`05-contracts.md`), поэтому его
+  недоступность не проверяется на старте бота как фатальная (в отличие от
+  notes-embeddings) - только логируется.
 - Исходящий трафик к произвольным сайтам идёт только из воркеров. Бот во
   внешний интернет ходит только в Telegram API. Это уменьшает поверхность
   SSRF, описанного в `03-ingest.md`.

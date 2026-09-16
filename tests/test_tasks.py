@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.clients.embeddings import EmbeddingServiceError
 from notes_bot.clients.llm import LLMResult, LLMServiceError
+from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import NoteRepository, UserSettingsRepository
 from notes_bot.queue.tasks import process_note_async
@@ -54,6 +55,21 @@ class FakeEmbeddingClient:
         return [[self._vector_value] * 768 for _ in texts]
 
     async def embed_query(self, text: str) -> list[float]:
+        raise NotImplementedError
+
+
+class FakeTranslateClient:
+    def __init__(self, fail_with: Exception | None = None) -> None:
+        self._fail_with = fail_with
+        self.calls: list[list[str]] = []
+
+    async def translate_passages(self, texts: list[str]) -> list[str]:
+        self.calls.append(list(texts))
+        if self._fail_with:
+            raise self._fail_with
+        return [f"[en] {t}" for t in texts]
+
+    async def translate_query(self, text: str) -> str:
         raise NotImplementedError
 
 
@@ -145,6 +161,52 @@ async def test_process_note_embeds_and_marks_done(factory):
         )
         == duration_before + 1
     )
+
+
+async def test_process_note_embeds_translated_text_but_stores_the_original_chunk(factory):
+    """04-search.md, "Перевод перед эмбеддингом": the vector must come from
+    the translated text, but chunk.text (used for rendering, e.g.
+    render_search_card) must stay exactly what was indexed — untranslated."""
+    note_id = await factory.insert_pending_text_note(text="привет мир")
+    embedding_client = FakeEmbeddingClient()
+    translate_client = FakeTranslateClient()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=embedding_client,
+        translate_client=translate_client,
+    )
+
+    assert translate_client.calls == [["привет мир"]]
+    assert embedding_client.calls == [["[en] привет мир"]]
+    async with factory() as session:
+        chunks = (
+            (await session.execute(select(NoteChunk).where(NoteChunk.note_id == note_id)))
+            .scalars()
+            .all()
+        )
+        assert chunks[0].chunk_text == "привет мир"
+
+
+async def test_process_note_falls_back_to_original_text_when_translate_fails(factory):
+    """Best-effort: a down translate service must not fail the note, only
+    degrade to embedding the original (untranslated) text."""
+    note_id = await factory.insert_pending_text_note(text="hello world")
+    embedding_client = FakeEmbeddingClient()
+    translate_client = FakeTranslateClient(fail_with=TranslateServiceError(503, "down"))
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=embedding_client,
+        translate_client=translate_client,
+    )
+
+    assert embedding_client.calls == [["hello world"]]
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "done"
 
 
 async def test_process_note_marks_failed_on_embedding_error(factory):

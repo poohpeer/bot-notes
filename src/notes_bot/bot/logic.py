@@ -5,6 +5,7 @@ thin aiogram-specific adapter on top of this.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from rq import Queue
@@ -13,12 +14,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from notes_bot.bot.render import RenderableHit, render_search_debug_empty
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.search_cache import SearchSessionCache
+from notes_bot.clients.translate import HttpTranslateClient, TranslateServiceError
 from notes_bot.config import Settings
 from notes_bot.db.repositories import ChatSettingsRepository, NoteRepository, UserSettingsRepository
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.classify import classify_text_message
 from notes_bot.queue.queues import enqueue_process_note, enqueue_smart_answer
+
+log = logging.getLogger(__name__)
 
 # instagram and voice go to `heavy` — see 03-ingest.md, "Шаг 2. Приём в
 # боте": "Выбрать очередь: instagram и voice → heavy, всё остальное → fast".
@@ -39,6 +43,10 @@ class Deps:
     # (notes_bot.health.mark_ready_after_get_me already calls it; cli/bot.py
     # reuses that result rather than calling getMe twice).
     bot_username: str = ""
+    # None when TRANSLATE_ENABLED=false — run_search then embeds query_text
+    # as-is, same as before notes-translate existed (04-search.md, "Перевод
+    # перед эмбеддингом").
+    translate_client: HttpTranslateClient | None = None
 
 
 @dataclass(frozen=True)
@@ -172,7 +180,22 @@ async def run_search(
             settings_row = await UserSettingsRepository(session).get_or_create(user_id)
             search_mode = settings_row.search_mode
 
-        query_vector = await deps.embedding_client.embed_query(query_text)
+        embed_text = query_text
+        if deps.translate_client is not None:
+            # 04-search.md, "Перевод перед эмбеддингом" — embed the
+            # translated query so it lands near notes translated the same
+            # way at index time (see queue/tasks.py's process_note_async),
+            # regardless of which language either was written in. Rendered
+            # hits (chunk_text/title below) are untouched — only the vector
+            # used to find them changes. Best-effort: a down/slow translate
+            # service falls back to the old same-language-only search for
+            # this query, not a failed search.
+            try:
+                embed_text = await deps.translate_client.translate_query(query_text)
+            except TranslateServiceError as exc:
+                log.warning("run_search: translate failed, using original query: %s", exc)
+
+        query_vector = await deps.embedding_client.embed_query(embed_text)
         predicate = visibility_predicate(
             user_id=user_id, chat_id=chat_id, is_group_chat=is_group_chat, search_mode=search_mode
         )

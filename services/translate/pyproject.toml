@@ -1,0 +1,50 @@
+[project]
+name = "notes-translate"
+version = "0.1.0"
+description = "Translation service for notes-bot — see docs/architecture/05-contracts.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "transformers>=4.44",
+    "sentencepiece>=0.2",
+    "torch>=2.4",
+    "py3langid>=0.2",
+    "pydantic-settings>=2.4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+# Same reasoning as embeddings_service/pyproject.toml: CPU-only wheels, no
+# GPU in this homelab, avoids bundling ~9GB of unused CUDA runtime.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/translate_service"]

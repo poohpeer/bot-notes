@@ -20,6 +20,7 @@ from notes_bot.bot.handlers import router
 from notes_bot.bot.logic import Deps
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.search_cache import SearchSessionCache
+from notes_bot.clients.translate import HttpTranslateClient
 from notes_bot.config import get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.health import create_health_app, mark_ready
@@ -86,6 +87,15 @@ async def main() -> None:
         llm_queue=Queue("llm", connection=rq_redis),
         settings=settings,
         bot_username=me.username or "",
+        translate_client=(
+            HttpTranslateClient(
+                settings.translate_url,
+                target_lang=settings.translate_target_lang,
+                timeout=settings.translate_timeout_s,
+            )
+            if settings.translate_enabled
+            else None
+        ),
     )
 
     dp = Dispatcher()

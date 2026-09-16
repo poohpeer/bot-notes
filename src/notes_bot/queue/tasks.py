@@ -41,6 +41,7 @@ from notes_bot.clients.prompts import load_prompt
 from notes_bot.clients.telegram_files import TelegramFileClient
 from notes_bot.clients.telegram_sender import Sender, TelegramSender
 from notes_bot.clients.transcribe import FasterWhisperClient
+from notes_bot.clients.translate import HttpTranslateClient, TranslateServiceError
 from notes_bot.config import Settings, get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.db.models import Note
@@ -177,6 +178,7 @@ async def process_note_async(
     sender: Sender | None = None,
     llm_client: LLMClient | None = None,
     llm_timeout_s: float = 120.0,
+    translate_client: HttpTranslateClient | None = None,
 ) -> None:
     # Empty, not a module-level default: a 'text' note never consults this
     # (see _extract_and_get_index_text), and every other source_type is
@@ -226,7 +228,25 @@ async def process_note_async(
                 # physically unfindable — see "Деградация".
                 raise ValueError("note has no text to index, even after degradation")
 
-            vectors = await embedding_client.embed_passages([c.text for c in chunks])
+            texts_to_embed = [c.text for c in chunks]
+            if translate_client is not None:
+                # 04-search.md, "Перевод перед эмбеддингом": embed the
+                # translated text so a Hebrew note is findable by a Russian
+                # query and vice versa, but `chunks` (chunk.text, used for
+                # display — render_search_card etc.) stays the original,
+                # untranslated text. Best-effort: a down/slow translate
+                # service must not fail note processing, only fall back to
+                # the old same-language-only search behavior for this note.
+                try:
+                    texts_to_embed = await translate_client.translate_passages(texts_to_embed)
+                except TranslateServiceError as exc:
+                    log.warning(
+                        "process_note: note_id=%s translate failed, embedding original text: %s",
+                        note_id,
+                        exc,
+                    )
+
+            vectors = await embedding_client.embed_passages(texts_to_embed)
             new_chunks = ChunkRepository.from_domain_chunks(chunks, vectors)
 
             await chunk_repo.replace_chunks(
@@ -330,7 +350,21 @@ def process_note(note_id: int) -> None:
             sender=TelegramSender(settings.telegram_bot_token),
             llm_client=_get_llm_client(settings),
             llm_timeout_s=settings.llm_enrich_timeout_s,
+            translate_client=_get_translate_client(settings),
         )
+    )
+
+
+def _get_translate_client(settings: Settings) -> HttpTranslateClient | None:
+    """None when TRANSLATE_ENABLED=false — process_note_async's own
+    `if translate_client is not None` then embeds the original text
+    untranslated, same as before this feature existed."""
+    if not settings.translate_enabled:
+        return None
+    return HttpTranslateClient(
+        settings.translate_url,
+        target_lang=settings.translate_target_lang,
+        timeout=settings.translate_timeout_s,
     )
 
 
