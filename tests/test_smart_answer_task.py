@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from notes_bot.bot.render import render_smart_answer_failed
 from notes_bot.clients.embeddings import EmbeddingServiceError
 from notes_bot.clients.llm import LLMResult, LLMServiceError
+from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.queue.tasks import smart_answer_async
 
@@ -23,6 +24,30 @@ class FakeEmbeddingClient:
 
     async def embed_query(self, text):
         return [1.0, 0.0] + [0.0] * 766
+
+
+class RecordingEmbeddingClient(FakeEmbeddingClient):
+    def __init__(self) -> None:
+        self.query_calls: list[str] = []
+
+    async def embed_query(self, text):
+        self.query_calls.append(text)
+        return await super().embed_query(text)
+
+
+class FakeTranslateClient:
+    def __init__(self, fail_with: Exception | None = None) -> None:
+        self._fail_with = fail_with
+        self.query_calls: list[str] = []
+
+    async def translate_passages(self, texts):
+        raise NotImplementedError
+
+    async def translate_query(self, text: str) -> str:
+        self.query_calls.append(text)
+        if self._fail_with:
+            raise self._fail_with
+        return f"[en] {text}"
 
 
 class ScriptedLLMClient:
@@ -304,3 +329,59 @@ async def test_embedding_failure_notifies_instead_of_leaving_the_pending_marker_
     )
     assert llm.calls == []
     assert sender.sent == [(1, render_smart_answer_failed())]
+
+
+async def test_embeds_the_translated_query_when_translate_client_set(factory):
+    """04-search.md, "Перевод перед эмбеддингом": smart_answer_async builds
+    its own LLM context independently of run_search's own translate-before-
+    embed (bot/logic.py) — this is the regression that shipped without it,
+    caught live: a Russian query against a Hebrew note scored 0.2147
+    (untranslated) vs 0.1427 (translated), the difference between missing
+    SEARCH_MAX_DISTANCE and clearing it."""
+    await factory.insert_done_note(raw_text="hello")
+    embedding_client = RecordingEmbeddingClient()
+    translate_client = FakeTranslateClient()
+    llm = ScriptedLLMClient(text="answer")
+    sender = FakeSender()
+
+    await smart_answer_async(
+        user_id=1,
+        chat_id=1,
+        is_group_chat=False,
+        query_text="где покататься на велике",
+        session_factory=factory,
+        embedding_client=embedding_client,
+        llm_client=llm,
+        llm_enabled=True,
+        timeout_s=10,
+        sender=sender,
+        translate_client=translate_client,
+    )
+    assert translate_client.query_calls == ["где покататься на велике"]
+    assert embedding_client.query_calls == ["[en] где покататься на велике"]
+
+
+async def test_falls_back_to_the_original_query_when_translate_fails(factory):
+    """Best-effort: a down translate service must not fail the answer, only
+    degrade to the old same-language-only behavior."""
+    await factory.insert_done_note(raw_text="hello")
+    embedding_client = RecordingEmbeddingClient()
+    translate_client = FakeTranslateClient(fail_with=TranslateServiceError(503, "down"))
+    llm = ScriptedLLMClient(text="answer")
+    sender = FakeSender()
+
+    await smart_answer_async(
+        user_id=1,
+        chat_id=1,
+        is_group_chat=False,
+        query_text="q",
+        session_factory=factory,
+        embedding_client=embedding_client,
+        llm_client=llm,
+        llm_enabled=True,
+        timeout_s=10,
+        sender=sender,
+        translate_client=translate_client,
+    )
+    assert embedding_client.query_calls == ["q"]
+    assert sender.sent[0][0] == 1

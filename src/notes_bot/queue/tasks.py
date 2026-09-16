@@ -525,6 +525,7 @@ async def smart_answer_async(
     sender: Sender,
     top_n: int = 10,
     max_distance: float | None = None,
+    translate_client: HttpTranslateClient | None = None,
 ) -> None:
     """`smart_answer` — see 04-search.md, "/smart_search": the synthesis of
     an already-queried search whose raw hits were never shown (the handler
@@ -553,8 +554,23 @@ async def smart_answer_async(
             settings_row = await UserSettingsRepository(session).get_or_create(user_id)
             search_mode = settings_row.search_mode
 
+        embed_text = query_text
+        if translate_client is not None:
+            # 04-search.md, "Перевод перед эмбеддингом" — same reasoning as
+            # run_search's own translate-before-embed: without it, this
+            # query vector never matches a note written in a different
+            # language, since this is a separate embed_query call from
+            # run_search's (smart_answer_async builds its own LLM context
+            # independently of the handler's earlier "any hits at all?"
+            # check). Best-effort: a down translate service falls back to
+            # embedding the original query, not a failed answer.
+            try:
+                embed_text = await translate_client.translate_query(query_text)
+            except TranslateServiceError as exc:
+                log.warning("smart_answer: user_id=%s translate failed: %s", user_id, exc)
+
         try:
-            query_vector = await embedding_client.embed_query(query_text)
+            query_vector = await embedding_client.embed_query(embed_text)
         except EmbeddingServiceError as exc:
             log.warning("smart_answer: user_id=%s embedding failed: %s", user_id, exc)
             await sender.send(chat_id, render_smart_answer_failed())
@@ -639,5 +655,6 @@ def smart_answer(user_id: int, chat_id: int, is_group_chat: bool, query_text: st
             timeout_s=settings.llm_smart_search_timeout_s,
             sender=TelegramSender(settings.telegram_bot_token),
             max_distance=settings.search_max_distance,
+            translate_client=_get_translate_client(settings),
         )
     )

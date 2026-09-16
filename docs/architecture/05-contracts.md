@@ -146,9 +146,14 @@
 
 ### Клиент в notes-bot и деградация
 
-`HttpTranslateClient` (`clients/translate.py`) вызывается из двух мест:
-`process_note_async` (текст заметки, перед `embed_passages`) и `run_search`
-(поисковый запрос, перед `embed_query`). В обоих местах вызов
+`HttpTranslateClient` (`clients/translate.py`) вызывается из трёх мест:
+`process_note_async` (текст заметки, перед `embed_passages`), `run_search`
+(поисковый запрос `/search`, перед `embed_query`) и `smart_answer_async`
+(поисковый запрос `/smart_search`, свой отдельный вызов `embed_query` - не
+переиспользует `run_search`, так что перевод пришлось подключать отдельно;
+забытый на первой итерации разрыв, пойманный на живом примере: запрос на
+русском против заметки на иврите без перевода давал distance 0.2147 - выше
+`SEARCH_MAX_DISTANCE=0.20`, с переводом - 0.1427). Во всех трёх местах вызов
 best-effort - `TranslateServiceError` перехватывается и логируется, а
 эмбеддинг считается по исходному, непереведённому тексту. `chunk_text` в
 БД (то, что видит пользователь в карточке) - всегда исходный, непереведённый
