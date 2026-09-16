@@ -393,7 +393,7 @@ jobs:
           # requirement — startup.py's own check logs and moves on rather
           # than crashing, so this step only warns too, same severity.
           if ($botLog -notmatch 'translate service reachable: model=') {
-            Write-Warning "notes-bot did not confirm notes-translate at startup (non-fatal — translation degrades to untranslated text/queries)."
+            Write-Warning "notes-bot did not confirm notes-translate at startup (non-fatal - translation degrades to untranslated text/queries)."
           }
           Write-Host "all four processes are up"
 
