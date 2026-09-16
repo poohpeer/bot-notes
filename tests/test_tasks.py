@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.clients.embeddings import EmbeddingServiceError
+from notes_bot.clients.llm import LLMResult, LLMServiceError
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import NoteRepository, UserSettingsRepository
 from notes_bot.queue.tasks import process_note_async
@@ -21,6 +22,20 @@ class FakeSender:
 
     async def send(self, chat_id, text):
         self.sent.append((chat_id, text))
+
+
+class ScriptedLLMClient:
+    """Same pattern as test_enrich.py's own — a fixed parsed payload (or a
+    scripted failure) regardless of prompt."""
+
+    def __init__(self, parsed=None, fail_with=None):
+        self._parsed = parsed
+        self._fail_with = fail_with
+
+    async def complete(self, *, system, user, json_schema=None, history=None, timeout_s=60.0):
+        if self._fail_with:
+            raise self._fail_with
+        return LLMResult(text="", parsed=self._parsed, model="scripted", usage=None)
 
 
 class FakeEmbeddingClient:
@@ -172,6 +187,58 @@ async def test_process_note_sends_debug_notification_when_enabled(factory):
     # user_settings rows outlive this fixture's per-test cleanup (it only
     # tracks notes) — reset so a later test doesn't inherit user_id=1 stuck
     # with debug on.
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+
+async def test_process_note_debug_notification_uses_an_llm_summary_when_available(factory):
+    note_id = await factory.insert_pending_text_note(text="hello world")
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+    sender = FakeSender()
+    llm = ScriptedLLMClient(parsed={"summary": "Видео о том, как женщина ищет мужа"})
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        sender=sender,
+        llm_client=llm,
+    )
+
+    assert len(sender.sent) == 1
+    _chat_id, text = sender.sent[0]
+    assert "Видео о том, как женщина ищет мужа" in text
+
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+
+async def test_process_note_debug_notification_falls_back_when_the_llm_call_fails(factory):
+    note_id = await factory.insert_pending_text_note(text="hello world")
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+    sender = FakeSender()
+    llm = ScriptedLLMClient(fail_with=LLMServiceError(503, "quota_exhausted", "no accounts left"))
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        sender=sender,
+        llm_client=llm,
+    )
+
+    # A slow/failed debug summary must not cost the note its own
+    # notification — falls back to the raw text preview instead.
+    assert len(sender.sent) == 1
+    _chat_id, text = sender.sent[0]
+    assert "hello world" in text
+
     async with factory() as session:
         await UserSettingsRepository(session).toggle_debug(user_id=1)
         await session.commit()

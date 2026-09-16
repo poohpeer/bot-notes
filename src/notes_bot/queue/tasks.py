@@ -175,6 +175,8 @@ async def process_note_async(
     llm_queue: Queue | None = None,
     alerts: AlertNotifier | None = None,
     sender: Sender | None = None,
+    llm_client: LLMClient | None = None,
+    llm_timeout_s: float = 120.0,
 ) -> None:
     # Empty, not a module-level default: a 'text' note never consults this
     # (see _extract_and_get_index_text), and every other source_type is
@@ -240,9 +242,28 @@ async def process_note_async(
                 # never turned it on, not a reason to skip the check.
                 if await UserSettingsRepository(session).is_debug_enabled(user_id):
                     elapsed_s = time.perf_counter() - started
+                    summary = None
+                    if llm_client is not None:
+                        try:
+                            summary = await generate_summary(
+                                llm_client, text, timeout_s=llm_timeout_s
+                            )
+                        except LLMServiceError as exc:
+                            # Best-effort: this is a debug convenience, not
+                            # the note's own processing — a failed/slow LLM
+                            # call here must not turn into a failed note, or
+                            # even a missing notification. Falls back to the
+                            # raw text preview below.
+                            log.warning(
+                                "process_note: note_id=%s debug summary failed: %s",
+                                note_id,
+                                exc,
+                            )
                     await sender.send(
                         chat_id,
-                        render_debug_processing_done(elapsed_s=elapsed_s, indexed_text=text),
+                        render_debug_processing_done(
+                            elapsed_s=elapsed_s, summary=summary, indexed_text=text
+                        ),
                     )
 
             if llm_queue is not None:
@@ -307,6 +328,8 @@ def process_note(note_id: int) -> None:
             llm_queue=_get_llm_queue(settings),
             alerts=_get_alerts(settings),
             sender=TelegramSender(settings.telegram_bot_token),
+            llm_client=_get_llm_client(settings),
+            llm_timeout_s=settings.llm_enrich_timeout_s,
         )
     )
 

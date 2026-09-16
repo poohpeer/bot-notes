@@ -57,16 +57,21 @@ def render_debug_toggle_confirmation(*, enabled: bool) -> str:
 _DEBUG_PREVIEW_MAX = 150
 
 
-def render_debug_processing_done(*, elapsed_s: float, indexed_text: str) -> str:
+def render_debug_processing_done(
+    *, elapsed_s: float, summary: str | None, indexed_text: str
+) -> str:
     """Sent by process_note itself once a note is fully processed, when the
-    owner has /debug on — see 03-ingest.md, "Debug: время обработки".
-    `indexed_text` is exactly what got chunked and embedded (no separate
-    LLM call to summarize it — enrich_note's own summary doesn't exist yet
-    at this point, it runs after process_note, and the point here is a
-    sanity check anyway: a preview of the real indexed text also reveals a
-    silent extraction failure that a fresh LLM summary would paper over."""
+    owner has /debug on — see 03-ingest.md, "Debug: время обработки". The
+    point is to tell at a glance what the note was actually about ("видео о
+    том, как женщина ищет мужа"), not just that something got indexed — so
+    a real LLM summary (process_note's own call to enrich.generate_summary,
+    over the same `text` that got chunked and embedded) is what's shown
+    when one's available. Falls back to a plain truncated excerpt of
+    `indexed_text` when it isn't (LLM_ENABLED=false, or the summary call
+    itself failed) — still enough to confirm real content got indexed
+    rather than, say, a silently degraded extraction leaving only the URL."""
     lines = [f"⏱ Обработка завершена. Заняло: {elapsed_s:.1f}с"]
-    preview = _truncate(indexed_text, _DEBUG_PREVIEW_MAX)
+    preview = summary.strip() if summary else _truncate(indexed_text, _DEBUG_PREVIEW_MAX)
     if preview:
         lines.append(preview)
     return "\n".join(lines)

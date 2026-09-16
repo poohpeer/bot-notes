@@ -58,25 +58,35 @@ def test_debug_toggle_confirmation_off():
 
 
 def test_debug_processing_done_includes_elapsed_seconds():
-    text = render_debug_processing_done(elapsed_s=12.34, indexed_text="some indexed text")
+    text = render_debug_processing_done(elapsed_s=12.34, summary=None, indexed_text="text")
     assert "12.3" in text
 
 
-def test_debug_processing_done_includes_a_preview_of_the_indexed_text():
+def test_debug_processing_done_prefers_the_llm_summary_over_the_raw_text():
     text = render_debug_processing_done(
-        elapsed_s=1.0, indexed_text="Обзор уличной еды в Тбилиси, хинкали и хачапури"
+        elapsed_s=1.0,
+        summary="Видео о том, как женщина ищет мужа",
+        indexed_text="a" * 500,  # would dominate the message if it were used instead
+    )
+    assert "Видео о том, как женщина ищет мужа" in text
+    assert "a" * 150 not in text
+
+
+def test_debug_processing_done_falls_back_to_a_text_preview_without_a_summary():
+    text = render_debug_processing_done(
+        elapsed_s=1.0, summary=None, indexed_text="Обзор уличной еды в Тбилиси, хинкали и хачапури"
     )
     assert "Обзор уличной еды в Тбилиси" in text
 
 
-def test_debug_processing_done_truncates_a_long_preview():
-    text = render_debug_processing_done(elapsed_s=1.0, indexed_text="a" * 500)
+def test_debug_processing_done_truncates_a_long_fallback_preview():
+    text = render_debug_processing_done(elapsed_s=1.0, summary=None, indexed_text="a" * 500)
     lines = text.splitlines()
     assert len(lines[1]) <= 150
 
 
-def test_debug_processing_done_omits_the_preview_line_when_text_is_empty():
-    text = render_debug_processing_done(elapsed_s=1.0, indexed_text="")
+def test_debug_processing_done_omits_the_preview_line_when_both_are_empty():
+    text = render_debug_processing_done(elapsed_s=1.0, summary=None, indexed_text="")
     assert text.splitlines() == ["⏱ Обработка завершена. Заняло: 1.0с"]
 
 
