@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     llm_enabled: bool = Field(default=False, alias="LLM_ENABLED")
     llm_enrich_timeout_s: float = Field(default=120.0, alias="LLM_ENRICH_TIMEOUT_S")
     llm_smart_search_timeout_s: float = Field(default=180.0, alias="LLM_SMART_SEARCH_TIMEOUT_S")
+    # /events_table (03-ingest.md) — a vision call over one or more
+    # screenshots, forced to provider="claude_code" (clients/llm.py: codex
+    # rejects images outright). Longer default than smart_search's text-only
+    # 180s: multiple images plus a structured JSON table is more work per
+    # call than synthesizing an answer from already-retrieved text.
+    events_table_timeout_s: float = Field(default=240.0, alias="EVENTS_TABLE_TIMEOUT_S")
     whisper_model: str = Field(default="small", alias="WHISPER_MODEL")
     max_audio_seconds: int = Field(default=1200, alias="MAX_AUDIO_SECONDS")
     max_download_bytes: int = Field(default=104857600, alias="MAX_DOWNLOAD_BYTES")

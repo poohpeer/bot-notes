@@ -26,6 +26,7 @@ _COMMON_COMMANDS = [
     BotCommand(command="search_mine", description="Искать только свои заметки"),
     BotCommand(command="search_all", description="Искать заметки всех"),
     BotCommand(command="debug", description="Вкл/выкл время обработки заметок"),
+    BotCommand(command="events_table", description="Разобрать скриншот таблицы (расписание)"),
 ]
 
 PRIVATE_COMMANDS = [

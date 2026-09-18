@@ -248,7 +248,13 @@ class LLMClient(Protocol):
         json_schema: dict | None = None,  # если задан - адаптер сам распарсит JSON из текста
         history: list[dict] | None = None,
         timeout_s: float = 60.0,
+        images: list[ImageInput] | None = None,  # см. "Изображения" ниже
     ) -> LLMResult: ...
+
+@dataclass
+class ImageInput:
+    media_type: str    # напр. "image/jpeg"
+    data_base64: str
 
 @dataclass
 class LLMResult:
@@ -260,6 +266,16 @@ class LLMResult:
 
 Порт не содержит `max_tokens` и `temperature`: ai-proxy их не принимает
 (`CompleteRequest` таких полей не имеет), и передавать их некуда.
+
+**Изображения.** `codex` не поддерживает изображения вовсе - `POST
+/v1/complete` с непустым `images` и `provider="codex"` отвечает `400
+unsupported_image_input`, проверено вживую запросом к боевому ai-proxy, а
+не по документации. `ProxyAILLMClient.complete` при непустом `images`
+поэтому не пробует `codex` вообще, а идёт сразу на `provider="claude_code"`
+- обычный codex-с-фоллбэком путь тут не подходит: пробовать codex первым
+значило бы платить за гарантированно проваленный запрос на каждый вызов с
+картинкой. Используется `/events_table` (03-ingest.md) - единственный
+вызывающий код с непустым `images` на данный момент.
 
 **Fallback на `claude_code`.** `ProxyAILLMClient` сначала всегда пробует
 `provider="codex"`; при `503 quota_exhausted` (все codex-аккаунты
@@ -388,6 +404,7 @@ def visibility_predicate(*, user_id: int, chat_id: int, is_group_chat: bool,
 | `LLM_ENABLED` | `false` до фикса песочницы в ai-proxy (ADR-14) | ConfigMap |
 | `LLM_ENRICH_TIMEOUT_S` | `120` | ConfigMap |
 | `LLM_SMART_SEARCH_TIMEOUT_S` | `180` | ConfigMap |
+| `EVENTS_TABLE_TIMEOUT_S` | `240` | ConfigMap |
 | `WHISPER_MODEL` | `small` | ConfigMap |
 | `MAX_AUDIO_SECONDS` | `1200` | ConfigMap |
 | `MAX_DOWNLOAD_BYTES` | `104857600` | ConfigMap |

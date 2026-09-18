@@ -5,10 +5,13 @@ from datetime import UTC, datetime
 
 import pytest
 import redis.asyncio as redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.bot.logic import (
     Deps,
+    cancel_events_table,
+    confirm_events_table,
     delete_note,
     edit_note_by_message,
     edit_note_text,
@@ -25,11 +28,13 @@ from notes_bot.bot.logic import (
     smart_search,
     toggle_privacy,
 )
+from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import ChatSettingsRepository, UserSettingsRepository
+from notes_bot.events_table import ExtractedEvent
 
 pytestmark = pytest.mark.asyncio
 
@@ -735,3 +740,122 @@ async def test_show_detail_rechecks_acl_and_hides_a_note_made_private_since(deps
 
     hit = await show_detail(deps, user_id=1, session_id=page.session_id, note_id=note_id)
     assert hit is None
+
+
+def _deps_with_events_cache(db_engine, redis_client) -> Deps:
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    return Deps(
+        session_factory=session_factory,
+        embedding_client=FakeEmbeddingClient(),
+        search_cache=SearchSessionCache(redis_client),
+        fast_queue=FakeQueue(),
+        heavy_queue=FakeQueue(),
+        llm_queue=FakeQueue(),
+        settings=_settings(),
+        pending_events_cache=PendingEventsCache(redis_client),
+    )
+
+
+async def test_confirm_events_table_creates_one_note_per_event(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    events = [
+        ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="a"),
+        ExtractedEvent(date_start="11/09/2026", date_end="13/09/2026", type="holiday", text="b"),
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=["школа"], events=events
+    )
+
+    result = await confirm_events_table(deps, session_id=session_id, user_id=1)
+
+    assert result.ok is True
+    assert result.count == 2
+    assert len(deps.fast_queue.calls) == 2
+    assert await deps.pending_events_cache.get(session_id) is None
+
+    async with deps.session_factory() as session:
+        notes = (
+            (
+                await session.execute(
+                    select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(notes) == 2
+        by_text = {n.raw_text: n for n in notes}
+        assert set(by_text["01/09/2026: a"].tags) == {"экзамен", "школа"}
+        assert set(by_text["11/09/2026–13/09/2026: b"].tags) == {"праздник", "школа"}
+        assert all(n.enrich_status == "skipped" for n in notes)
+        assert all(n.visibility == "private" for n in notes)  # private chat default
+
+
+async def test_confirm_events_table_group_notes_have_no_visibility(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    events = [
+        ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="event", text="a")
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=-100, user_id=1, is_group=True, tab_name="t", topic_tags=[], events=events
+    )
+
+    result = await confirm_events_table(deps, session_id=session_id, user_id=1)
+    assert result.ok is True
+
+    async with deps.session_factory() as session:
+        note = (
+            await session.execute(
+                select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+            )
+        ).scalar_one()
+        assert note.is_group is True
+        assert note.visibility is None
+
+
+async def test_confirm_events_table_rejects_the_wrong_user(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    events = [
+        ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="event", text="a")
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=events
+    )
+
+    result = await confirm_events_table(deps, session_id=session_id, user_id=999)
+
+    assert result.ok is False
+    # Untouched — still there for the real owner to confirm or cancel.
+    assert await deps.pending_events_cache.get(session_id) is not None
+
+
+async def test_confirm_events_table_expired_session(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    result = await confirm_events_table(deps, session_id="does-not-exist", user_id=1)
+    assert result.ok is False
+
+
+async def test_cancel_events_table_discards_the_session(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    events = [
+        ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="event", text="a")
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=events
+    )
+
+    assert await cancel_events_table(deps, session_id=session_id, user_id=1) is True
+    assert await deps.pending_events_cache.get(session_id) is None
+
+
+async def test_cancel_events_table_rejects_the_wrong_user(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    events = [
+        ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="event", text="a")
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=events
+    )
+
+    assert await cancel_events_table(deps, session_id=session_id, user_id=999) is False
+    assert await deps.pending_events_cache.get(session_id) is not None

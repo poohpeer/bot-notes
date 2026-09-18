@@ -253,6 +253,19 @@ class NoteRepository:
             update(Note).where(Note.id == note_id).values(enrich_status="skipped")
         )
 
+    async def set_tags_and_skip_enrich(self, note_id: int, tags: list[str]) -> None:
+        """`table_event` notes (03-ingest.md, "/events_table") already carry
+        their own tags from the extraction call itself (event type +
+        topic_tags) - `enrich_note`'s own `generate_tags` would overwrite
+        them with a guess made from a single short event line, with no
+        knowledge of the table's broader topic. `enrich_status='skipped'`
+        here mirrors `mark_enrich_skipped` (process_note_async never
+        enqueues `enrich_note` for this source_type in the first place, so
+        this is the value it settles on, not a race with a real run)."""
+        await self._session.execute(
+            update(Note).where(Note.id == note_id).values(tags=tags, enrich_status="skipped")
+        )
+
     async def toggle_visibility(self, note_id: int, user_id: int) -> str | None:
         """Flips private<->public. Ownership is enforced in the WHERE clause
         of the UPDATE itself — zero rows affected means "not yours or

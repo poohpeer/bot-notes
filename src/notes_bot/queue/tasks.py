@@ -24,13 +24,18 @@ import logging
 import time
 from html import escape as _esc
 
+import redis.asyncio as async_redis
 from redis import Redis
 from rq import Queue
 from sqlalchemy import and_
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
+from notes_bot.bot.keyboards import events_table_confirm_keyboard
 from notes_bot.bot.render import (
     render_debug_processing_done,
+    render_events_table_disabled,
+    render_events_table_empty,
+    render_events_table_preview,
     render_places,
     render_processing_failed,
     render_smart_answer_debug,
@@ -39,12 +44,14 @@ from notes_bot.bot.render import (
 from notes_bot.clients.alerts import AlertNotifier, NullNotifier, build_notifier
 from notes_bot.clients.embeddings import EmbeddingServiceError, HttpEmbeddingClient
 from notes_bot.clients.llm import (
+    ImageInput,
     LLMClient,
     LLMServiceError,
     NullLLMClient,
     ProxyAILLMClient,
     extract_token_usage,
 )
+from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.prompts import load_prompt
 from notes_bot.clients.telegram_files import TelegramFileClient
 from notes_bot.clients.telegram_sender import Sender, TelegramSender
@@ -65,6 +72,7 @@ from notes_bot.enrich import (
     generate_tags,
     generate_title,
 )
+from notes_bot.events_table import extract_events_table
 from notes_bot.extractors.base import Extractor
 from notes_bot.extractors.instagram import InstagramExtractor
 from notes_bot.extractors.map import MapExtractor
@@ -85,6 +93,14 @@ _session_factory: async_sessionmaker | None = None
 _extractors: dict[str, Extractor] | None = None
 _llm_queue: Queue | None = None
 _alerts: AlertNotifier | None = None
+_pending_events_cache: PendingEventsCache | None = None
+
+
+def _get_pending_events_cache(settings: Settings) -> PendingEventsCache:
+    global _pending_events_cache
+    if _pending_events_cache is None:
+        _pending_events_cache = PendingEventsCache(async_redis.from_url(settings.redis_url))
+    return _pending_events_cache
 
 
 def _get_session_factory(settings: Settings) -> async_sessionmaker:
@@ -150,8 +166,13 @@ async def _extract_and_get_index_text(
     everything else, extracted_text wins when non-empty; an extractor that
     failed or found nothing degrades to raw_text (the URL itself, still
     findable) rather than failing the note.
+
+    'table_event' (03-ingest.md, "/events_table") is the other no-extractor
+    case: its raw_text is already the final event text, produced by the
+    extraction *call* itself (events_table.py), not something a further
+    extractor step would improve on.
     """
-    if note.source_type == "text":
+    if note.source_type in ("text", "table_event"):
         return note.raw_text or ""
 
     extractor = extractors.get(note.source_type)
@@ -312,11 +333,19 @@ async def process_note_async(
                         ),
                     )
 
-            if llm_queue is not None:
+            if llm_queue is not None and source_type != "table_event":
                 # 03-ingest.md's sequence diagram: enrichment is queued
                 # right after status=done, never blocking it — a note is
                 # fully findable before enrich_note ever runs. Deterministic
                 # job_id (ADR-8), same as process_note's own enqueue.
+                #
+                # table_event is the one exception: "/events_table" already
+                # set tags (event type + the table's own topic_tags) via
+                # NoteRepository.set_tags_and_skip_enrich, from the same
+                # extraction call that produced the note text — enrich_note's
+                # own generate_tags would overwrite them with a guess made
+                # from one short line, with no knowledge of the table's
+                # broader topic.
                 llm_queue.enqueue(enrich_note, note_id, job_id=f"enrich_note-{note_id}")
 
         except EmbeddingServiceError as exc:
@@ -716,5 +745,81 @@ def smart_answer(user_id: int, chat_id: int, is_group_chat: bool, query_text: st
             sender=TelegramSender(settings.telegram_bot_token),
             max_distance=settings.search_max_distance,
             translate_client=_get_translate_client(settings),
+        )
+    )
+
+
+async def parse_events_table_async(
+    *,
+    chat_id: int,
+    user_id: int,
+    is_group: bool,
+    tab_name: str,
+    images: list[ImageInput],
+    llm_client: LLMClient,
+    llm_enabled: bool,
+    timeout_s: float,
+    sender: Sender,
+    pending_cache: PendingEventsCache,
+) -> None:
+    """`/events_table` (03-ingest.md) — the vision call itself, on the `llm`
+    queue same as `smart_answer`: this is user-facing-but-LLM-heavy, not
+    urgent the way `process_note` is. handlers.py buffers the Telegram
+    album and downloads the photos; this only does the LLM call and the
+    preview/cache step, so a slow ai-proxy round trip never blocks the
+    single bot replica's polling loop.
+    """
+    if not llm_enabled:
+        log.info("parse_events_table: chat_id=%s LLM disabled, skipping", chat_id)
+        await sender.send(chat_id, render_events_table_disabled())
+        return
+
+    table = await extract_events_table(
+        llm_client, images=images, tab_name=tab_name, timeout_s=timeout_s
+    )
+    if not table.events:
+        await sender.send(chat_id, render_events_table_empty(tab_name))
+        return
+
+    session_id = await pending_cache.create(
+        chat_id=chat_id,
+        user_id=user_id,
+        is_group=is_group,
+        tab_name=tab_name,
+        topic_tags=table.topic_tags,
+        events=table.events,
+    )
+    # Insertion order, not alphabetical — matches the order events were
+    # actually found, which is usually chronological (dates top to bottom).
+    type_counts: dict[str, int] = {}
+    for event in table.events:
+        type_counts[event.tag] = type_counts.get(event.tag, 0) + 1
+
+    await sender.send(
+        chat_id,
+        render_events_table_preview(
+            tab_name=tab_name, topic_tags=table.topic_tags, type_counts=type_counts
+        ),
+        reply_markup=events_table_confirm_keyboard(session_id),
+    )
+
+
+def parse_events_table(
+    *, chat_id: int, user_id: int, is_group: bool, tab_name: str, images: list[ImageInput]
+) -> None:
+    """The RQ-registered entrypoint — `llm` queue, see 06-deployment.md."""
+    settings = get_settings()
+    asyncio.run(
+        parse_events_table_async(
+            chat_id=chat_id,
+            user_id=user_id,
+            is_group=is_group,
+            tab_name=tab_name,
+            images=images,
+            llm_client=_get_llm_client(settings),
+            llm_enabled=settings.llm_enabled,
+            timeout_s=settings.events_table_timeout_s,
+            sender=TelegramSender(settings.telegram_bot_token),
+            pending_cache=_get_pending_events_cache(settings),
         )
     )

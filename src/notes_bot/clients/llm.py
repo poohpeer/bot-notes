@@ -29,6 +29,18 @@ class LLMResult:
     usage: dict | None
 
 
+@dataclass(frozen=True)
+class ImageInput:
+    """Mirrors ai-proxy's `ImageInput` schema (`media_type`, `data_base64`)
+    - see 05-contracts.md, "Порт LLMClient". `codex` rejects these outright
+    (`400 unsupported_image_input`, confirmed live) - `ProxyAILLMClient`
+    routes an `images`-bearing call straight to `claude_code`, never
+    attempting `codex` first, see its own `complete()`."""
+
+    media_type: str
+    data_base64: str
+
+
 def extract_token_usage(usage: dict | None) -> tuple[int | None, int | None]:
     """(tokens_in, tokens_out), best-effort — ai-proxy's `metadata` shape
     (05-contracts.md, "Порт LLMClient") differs by provider. Verified live
@@ -64,6 +76,7 @@ class LLMClient(Protocol):
         json_schema: dict | None = None,
         history: list[dict] | None = None,
         timeout_s: float = 60.0,
+        images: list[ImageInput] | None = None,
     ) -> LLMResult: ...
 
 
@@ -100,6 +113,7 @@ class NullLLMClient:
         json_schema: dict | None = None,
         history: list[dict] | None = None,
         timeout_s: float = 60.0,
+        images: list[ImageInput] | None = None,
     ) -> LLMResult:
         return LLMResult(text="", parsed=None, model=None, usage=None)
 
@@ -124,8 +138,11 @@ class FakeLLMClient:
         json_schema: dict | None = None,
         history: list[dict] | None = None,
         timeout_s: float = 60.0,
+        images: list[ImageInput] | None = None,
     ) -> LLMResult:
-        self.calls.append({"system": system, "user": user, "json_schema": json_schema})
+        self.calls.append(
+            {"system": system, "user": user, "json_schema": json_schema, "images": images}
+        )
         for key, result in self._replies.items():
             if key in user or key in system:
                 return result
@@ -190,6 +207,7 @@ class ProxyAILLMClient:
         json_schema: dict | None = None,
         history: list[dict] | None = None,
         timeout_s: float = 60.0,
+        images: list[ImageInput] | None = None,
     ) -> LLMResult:
         effective_system = system
         if json_schema is not None:
@@ -200,7 +218,7 @@ class ProxyAILLMClient:
             )
 
         response = await self._request(
-            system=effective_system, user=user, history=history, timeout_s=timeout_s
+            system=effective_system, user=user, history=history, timeout_s=timeout_s, images=images
         )
         text = response["result"] or ""
         model = response.get("model")
@@ -220,7 +238,7 @@ class ProxyAILLMClient:
             f"Верни только валидный JSON, без пояснений."
         )
         retry_response = await self._request(
-            system=retry_system, user=user, history=history, timeout_s=timeout_s
+            system=retry_system, user=user, history=history, timeout_s=timeout_s, images=images
         )
         retry_text = retry_response["result"] or ""
         parsed = _extract_json(retry_text)
@@ -229,8 +247,26 @@ class ProxyAILLMClient:
         )
 
     async def _request(
-        self, *, system: str, user: str, history: list[dict] | None, timeout_s: float
+        self,
+        *,
+        system: str,
+        user: str,
+        history: list[dict] | None,
+        timeout_s: float,
+        images: list[ImageInput] | None = None,
     ) -> dict:
+        if images:
+            # codex rejects images outright (400 unsupported_image_input,
+            # confirmed live) — go straight to the one provider known to
+            # accept them, never spend a codex attempt just to fail it.
+            return await self._request_provider(
+                self._FALLBACK_PROVIDER,
+                system=system,
+                user=user,
+                history=history,
+                timeout_s=timeout_s,
+                images=images,
+            )
         try:
             return await self._request_provider(
                 self._PRIMARY_PROVIDER,
@@ -256,7 +292,14 @@ class ProxyAILLMClient:
             )
 
     async def _request_provider(
-        self, provider: str, *, system: str, user: str, history: list[dict] | None, timeout_s: float
+        self,
+        provider: str,
+        *,
+        system: str,
+        user: str,
+        history: list[dict] | None,
+        timeout_s: float,
+        images: list[ImageInput] | None = None,
     ) -> dict:
         body = {
             "provider": provider,
@@ -266,6 +309,11 @@ class ProxyAILLMClient:
             "json_schema": None,
             "timeout_s": timeout_s,
             "history": history or [],
+            "images": (
+                [{"media_type": i.media_type, "data_base64": i.data_base64} for i in images]
+                if images
+                else None
+            ),
         }
         async with httpx.AsyncClient(timeout=timeout_s + 5, transport=self._transport) as client:
             try:

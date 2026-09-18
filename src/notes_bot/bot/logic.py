@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.bot.render import RenderableHit, render_search_debug_empty
 from notes_bot.clients.embeddings import HttpEmbeddingClient
+from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.clients.translate import HttpTranslateClient, TranslateServiceError
 from notes_bot.config import Settings
@@ -47,6 +48,11 @@ class Deps:
     # as-is, same as before notes-translate existed (04-search.md, "Перевод
     # перед эмбеддингом").
     translate_client: HttpTranslateClient | None = None
+    # /events_table (03-ingest.md) — holds a parsed table between the
+    # preview message (sent by the worker, queue/tasks.py's
+    # parse_events_table) and the Сохранить/Отмена tap, which runs here in
+    # the bot process. None only in tests that don't exercise this command.
+    pending_events_cache: PendingEventsCache | None = None
 
 
 @dataclass(frozen=True)
@@ -518,3 +524,70 @@ async def set_group_capture_mode(deps: Deps, *, chat_id: int, mode: str) -> None
     async with deps.session_factory() as session:
         await ChatSettingsRepository(session).set_capture_mode(chat_id, mode)
         await session.commit()
+
+
+@dataclass(frozen=True)
+class ConfirmEventsTableResult:
+    ok: bool
+    count: int = 0
+
+
+async def confirm_events_table(
+    deps: Deps, *, session_id: str, user_id: int
+) -> ConfirmEventsTableResult:
+    """ "✅ Сохранить" on the /events_table preview (03-ingest.md) — one note
+    per parsed event, tagged with the event's own type (экзамен/праздник/
+    мероприятие) plus the table's topic_tags from the same extraction
+    call. `ok=False` on an expired/foreign session — expired is normal
+    (30-minute TTL, same as SearchSessionCache), foreign never happens
+    through the bot's own UI but is still checked, same as show_detail's
+    own re-check."""
+    if deps.pending_events_cache is None:
+        return ConfirmEventsTableResult(ok=False)
+    pending = await deps.pending_events_cache.get(session_id)
+    if pending is None or pending.user_id != user_id:
+        return ConfirmEventsTableResult(ok=False)
+
+    async with deps.session_factory() as session:
+        note_repo = NoteRepository(session)
+        visibility: str | None = None
+        if not pending.is_group:
+            settings_row = await UserSettingsRepository(session).get_or_create(pending.user_id)
+            visibility = settings_row.default_visibility
+
+        created_ids: list[int] = []
+        for event in pending.extracted_events():
+            note = await note_repo.create_note(
+                user_id=pending.user_id,
+                chat_id=pending.chat_id,
+                is_group=pending.is_group,
+                # No natural Telegram message per event (one album produced
+                # N events) — ADR-8's idempotency key doesn't apply here,
+                # each confirm click is its own one-off batch.
+                tg_message_id=None,
+                source_type="table_event",
+                raw_text=event.note_text,
+                visibility=visibility,
+            )
+            if note is None:
+                continue
+            tags = sorted({event.tag, *pending.topic_tags})
+            await note_repo.set_tags_and_skip_enrich(note.id, tags)
+            created_ids.append(note.id)
+        await session.commit()
+
+    for note_id in created_ids:
+        enqueue_process_note(deps.fast_queue, note_id)
+
+    await deps.pending_events_cache.delete(session_id)
+    return ConfirmEventsTableResult(ok=True, count=len(created_ids))
+
+
+async def cancel_events_table(deps: Deps, *, session_id: str, user_id: int) -> bool:
+    if deps.pending_events_cache is None:
+        return False
+    pending = await deps.pending_events_cache.get(session_id)
+    if pending is None or pending.user_id != user_id:
+        return False
+    await deps.pending_events_cache.delete(session_id)
+    return True

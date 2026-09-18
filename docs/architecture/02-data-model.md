@@ -22,7 +22,7 @@ CREATE TABLE notes (
     visibility      TEXT,                     -- 'private' | 'public'; NULL для групповых
 
     -- Контент
-    source_type     TEXT NOT NULL,            -- 'text'|'voice'|'page'|'youtube'|'instagram'|'map'
+    source_type     TEXT NOT NULL,            -- 'text'|'voice'|'page'|'youtube'|'instagram'|'map'|'table_event'
     source_url      TEXT,
     raw_text        TEXT,                     -- ровно то, что прислал пользователь
     extracted_text  TEXT,                     -- то, что добыли экстракторы
@@ -49,7 +49,8 @@ CREATE TABLE notes (
     CONSTRAINT notes_enrich_status_ck
         CHECK (enrich_status IN ('pending','processing','done','failed','skipped')),
     CONSTRAINT notes_source_type_ck
-        CHECK (source_type IN ('text','voice','page','youtube','instagram','map')),
+        CHECK (source_type IN
+            ('text','voice','page','youtube','instagram','map','table_event')),
     -- Ключевой инвариант приватности: групповая заметка не имеет visibility,
     -- личная - обязана иметь. Проверяется базой, а не только кодом.
     CONSTRAINT notes_visibility_ck CHECK (
@@ -153,6 +154,7 @@ CREATE TABLE chat_settings (
 | `youtube` | `заголовок + описание + субтитры` (собирается экстрактором в `extracted_text`) |
 | `instagram` | `caption + "\n\n" + транскрипт` (собирается экстрактором в `extracted_text`) |
 | `map` | имя места из финального URL |
+| `table_event` | `raw_text` - одно событие, извлечённое из скриншота таблицы (03-ingest.md, "/events_table"); нет `extracted_text`, нет экстрактора - создаётся сразу готовым по подтверждению пользователя |
 
 Разделение `raw_text` / `extracted_text` нужно, потому что редактирование
 разрешено только для `source_type='text'`: пользователь правит `raw_text`, а

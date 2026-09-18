@@ -17,6 +17,14 @@ from notes_bot.queue.tasks import process_note_async
 pytestmark = pytest.mark.asyncio
 
 
+class FakeQueue:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def enqueue(self, func, *args, job_id=None, **kw):
+        self.calls.append((func, args, job_id))
+
+
 class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str]] = []
@@ -610,3 +618,56 @@ async def test_process_note_raises_for_a_source_type_with_no_extractor_yet(facto
         # Caught by process_note_async's generic except clause, same as any
         # other extraction failure — not a crash of the worker process.
         assert note.status == "failed"
+
+
+async def test_process_note_indexes_a_table_event_note_like_a_text_note(factory):
+    """/events_table (03-ingest.md) — 'table_event' has no registered
+    extractor, same as 'text': raw_text (the event's own note_text, already
+    final) is what gets chunked and embedded directly."""
+    note_id = await factory.insert_pending_note(
+        source_type="table_event", raw_text="01/09/2026: מבחן עברית"
+    )
+    client = FakeEmbeddingClient()
+
+    await process_note_async(note_id, session_factory=factory, embedding_client=client)
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "done"
+    assert client.calls == [["01/09/2026: מבחן עברית"]]
+
+
+async def test_process_note_never_enqueues_enrich_for_table_event(factory):
+    """set_tags_and_skip_enrich (called by logic.confirm_events_table,
+    before process_note ever runs) already set the tags this note should
+    have — enrich_note's own generate_tags would overwrite them with a
+    guess made from one short line."""
+    note_id = await factory.insert_pending_note(
+        source_type="table_event", raw_text="01/09/2026: מבחן עברית"
+    )
+    llm_queue = FakeQueue()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        llm_queue=llm_queue,
+    )
+
+    assert llm_queue.calls == []
+
+
+async def test_process_note_still_enqueues_enrich_for_a_plain_text_note(factory):
+    """Regression guard for the table_event carve-out above — every other
+    source_type keeps queueing enrich_note as before."""
+    note_id = await factory.insert_pending_text_note()
+    llm_queue = FakeQueue()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        llm_queue=llm_queue,
+    )
+
+    assert len(llm_queue.calls) == 1

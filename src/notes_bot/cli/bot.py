@@ -19,6 +19,7 @@ from notes_bot.bot.commands import set_bot_commands
 from notes_bot.bot.handlers import router
 from notes_bot.bot.logic import Deps
 from notes_bot.clients.embeddings import HttpEmbeddingClient
+from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.clients.translate import HttpTranslateClient
 from notes_bot.config import get_settings
@@ -82,6 +83,7 @@ async def main() -> None:
             dim=settings.embedding_dim,
         ),
         search_cache=SearchSessionCache(async_redis.from_url(settings.redis_url)),
+        pending_events_cache=PendingEventsCache(async_redis.from_url(settings.redis_url)),
         fast_queue=Queue("fast", connection=rq_redis),
         heavy_queue=Queue("heavy", connection=rq_redis),
         llm_queue=Queue("llm", connection=rq_redis),

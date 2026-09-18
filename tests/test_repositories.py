@@ -333,6 +333,20 @@ async def test_mark_enrich_skipped(db_session):
     assert refreshed.enrich_status == "skipped"
 
 
+async def test_set_tags_and_skip_enrich(db_session):
+    """/events_table (03-ingest.md) — tags come from the extraction call
+    itself, not enrich_note's own generate_tags."""
+    repo = NoteRepository(db_session)
+    note = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=204, raw_text="x", visibility="private"
+    )
+    await repo.set_tags_and_skip_enrich(note.id, ["экзамен", "школа"])
+    await db_session.flush()
+    refreshed = await repo.get(note.id)
+    assert refreshed.tags == ["экзамен", "школа"]
+    assert refreshed.enrich_status == "skipped"
+
+
 async def test_get_first_chunk_embedding_returns_the_lowest_index_chunk(db_session):
     repo = NoteRepository(db_session)
     chunk_repo = ChunkRepository(db_session)

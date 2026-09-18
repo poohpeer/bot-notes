@@ -27,6 +27,11 @@ data:
   LLM_ENABLED: "true"
   LLM_ENRICH_TIMEOUT_S: "120"
   LLM_SMART_SEARCH_TIMEOUT_S: "180"
+  # /events_table (03-ingest.md) — a vision call, forced to provider=
+  # "claude_code" (codex rejects images outright). Higher than
+  # LLM_SMART_SEARCH_TIMEOUT_S: several images plus a structured JSON table
+  # is more work per call than synthesizing an answer from retrieved text.
+  EVENTS_TABLE_TIMEOUT_S: "240"
   WHISPER_MODEL: "small"
   MAX_AUDIO_SECONDS: "1200"
   MAX_DOWNLOAD_BYTES: "104857600"

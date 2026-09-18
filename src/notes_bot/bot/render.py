@@ -15,6 +15,7 @@ _SOURCE_ICONS = {
     "youtube": "▶️",
     "instagram": "📷",
     "map": "📍",
+    "table_event": "📅",
 }
 
 _FRAGMENT_MAX = 200
@@ -367,6 +368,62 @@ def render_edit_saved() -> str:
 
 def render_edit_refused() -> str:
     return "Не получилось изменить — заметка не ваша или её нельзя редактировать."
+
+
+def render_events_table_usage() -> str:
+    """A bare `/events_table`, no photos attached — see 03-ingest.md,
+    "/events_table". Mirrors /search's own "Использование: ..." reply for
+    an argument-less command, not silence."""
+    return (
+        "Использование: пришлите один или несколько скриншотов таблицы "
+        "(альбомом, если их несколько) с подписью\n"
+        "/events_table <название таба>\n\n"
+        "Например: /events_table שכבה י'"
+    )
+
+
+def render_events_table_started(tab_name: str) -> str:
+    """Sent immediately in the bot process, before the album is even
+    downloaded (handlers.py's F.photo handler) — the actual LLM call runs
+    async on the `llm` queue and can take up to events_table_timeout_s
+    (240с by default), so this stands in for a "typing" indicator that
+    can't span that long."""
+    return f'🔎 Разбираю таблицу "{tab_name}"…'
+
+
+def render_events_table_disabled() -> str:
+    return "Разбор таблиц выключен (LLM_ENABLED=false)."
+
+
+def render_events_table_empty(tab_name: str) -> str:
+    return f'Не нашёл ни одного события в табе "{tab_name}". Попробуйте более чёткий скриншот.'
+
+
+def render_events_table_preview(
+    *, tab_name: str, topic_tags: list[str], type_counts: dict[str, int]
+) -> str:
+    """Sent by the worker (queue/tasks.py's parse_events_table) once
+    extraction finishes, with `keyboards.events_table_confirm_keyboard`
+    attached — see 03-ingest.md, "/events_table". `type_counts` keys are
+    the Russian tag names (events_table.ExtractedEvent.tag), so this
+    doesn't need to know the English exam/holiday/event vocabulary."""
+    lines = [f'Нашёл {sum(type_counts.values())} событий в табе "{tab_name}":']
+    lines.extend(f"  {count} — {tag}" for tag, count in type_counts.items())
+    if topic_tags:
+        lines.append("Теги: " + ", ".join(f"#{t}" for t in topic_tags))
+    return "\n".join(lines)
+
+
+def render_events_table_saved(count: int) -> str:
+    return f"Сохранил {count} заметок."
+
+
+def render_events_table_cancelled() -> str:
+    return "Отменено, ничего не сохранено."
+
+
+def render_events_table_expired() -> str:
+    return "Этот разбор таблицы устарел, пришлите скриншоты заново."
 
 
 def _truncate(text: str, max_len: int) -> str:

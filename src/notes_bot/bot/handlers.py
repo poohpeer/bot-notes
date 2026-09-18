@@ -10,6 +10,11 @@ see on_group_message_edited — (ADR-10), a welcome message on join,
 the room (on_list_group — never a member's own private-chat notes, see
 NoteRepository.list_group). /trash stays private-only.
 
+/events_table (both chat types): an album of screenshots with caption
+"/events_table <tab name>" — buffered in-process (on_events_table_photo),
+parsed on the `llm` queue (queue/tasks.py's parse_events_table), previewed
+with a Сохранить/Отмена keyboard, confirmed here (on_events_table_confirm).
+
 Known gap: 03-ingest.md's flow diagram has the worker notify the bot when a
 note finishes processing, and — for voice specifically — "Бот отвечает на
 голосовое распознанным текстом, чтобы пользователь сразу видел, что именно
@@ -23,7 +28,11 @@ UX touch.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import logging
+import re
+from dataclasses import dataclass, field
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -42,6 +51,8 @@ from notes_bot.bot.keyboards import (
 from notes_bot.bot.logic import (
     Deps,
     NotesPage,
+    cancel_events_table,
+    confirm_events_table,
     delete_note,
     edit_note_by_message,
     list_group_notes,
@@ -63,6 +74,11 @@ from notes_bot.bot.render import (
     render_delete_confirmation_prompt,
     render_delete_refused,
     render_edit_saved,
+    render_events_table_cancelled,
+    render_events_table_expired,
+    render_events_table_saved,
+    render_events_table_started,
+    render_events_table_usage,
     render_group_note_saved,
     render_group_welcome,
     render_list_empty,
@@ -79,8 +95,11 @@ from notes_bot.bot.render import (
     render_trash_empty,
     render_voice_note_saved,
 )
+from notes_bot.clients.llm import ImageInput
+from notes_bot.clients.telegram_files import TelegramFileClient, TelegramFileError
 from notes_bot.db.repositories import ChatSettingsRepository, UserSettingsRepository
 from notes_bot.domain.group_capture import Entity, mentions_bot, should_capture_group_message
+from notes_bot.queue.queues import enqueue_parse_events_table
 
 log = logging.getLogger(__name__)
 
@@ -521,3 +540,128 @@ async def on_restore(callback: CallbackQuery, deps: Deps) -> None:
     await callback.message.edit_text(
         render_note_restored() if restored else render_delete_refused()
     )
+
+
+# ---------------------------------------------------------------------------
+# /events_table — see docs/architecture/03-ingest.md, "/events_table"
+# ---------------------------------------------------------------------------
+
+# One or more screenshots sent as an album arrive as separate `message`
+# updates sharing `media_group_id`, with no signal from Telegram for "this
+# is the last one" — buffered here (single bot replica, per cli/bot.py's own
+# module docstring, so in-process state is safe) and flushed after a short
+# gap in arrivals. A lone photo (no album) gets a synthetic key instead of
+# `None`, so two single-photo messages arriving close together in the same
+# chat never share a buffer entry.
+_ALBUM_DEBOUNCE_S = 2.0
+_EVENTS_TABLE_CAPTION_RE = re.compile(r"^/events_table(?:@\w+)?(?:\s+(.*))?$", re.DOTALL)
+
+
+@dataclass
+class _PendingAlbum:
+    file_ids: list[str] = field(default_factory=list)
+    # Whichever message in the group actually carried the caption — that's
+    # the one whose text tells us this is an /events_table submission at
+    # all, and the one we reply to once parsing starts.
+    caption_message: Message | None = None
+    any_message: Message | None = None
+
+
+_album_buffers: dict[str, _PendingAlbum] = {}
+_album_tasks: dict[str, asyncio.Task] = {}
+
+
+@router.message(Command("events_table"))
+async def on_events_table_usage(message: Message) -> None:
+    # Only ever matches a plain text message — a photo's caption lives in
+    # `message.caption`, not `message.text`, so a captioned photo never
+    # reaches this handler at all; see on_events_table_photo below.
+    await message.answer(render_events_table_usage())
+
+
+@router.message(F.photo)
+async def on_events_table_photo(message: Message, deps: Deps) -> None:
+    group_key = message.media_group_id or f"single:{message.chat.id}:{message.message_id}"
+    pending = _album_buffers.setdefault(group_key, _PendingAlbum())
+    # Telegram lists each photo at several resolutions; [-1] is the largest.
+    pending.file_ids.append(message.photo[-1].file_id)
+    pending.any_message = message
+    if message.caption:
+        pending.caption_message = message
+
+    previous_task = _album_tasks.get(group_key)
+    if previous_task is not None:
+        previous_task.cancel()
+    _album_tasks[group_key] = asyncio.create_task(_flush_events_table_album(group_key, deps))
+
+
+async def _flush_events_table_album(group_key: str, deps: Deps) -> None:
+    try:
+        await asyncio.sleep(_ALBUM_DEBOUNCE_S)
+    except asyncio.CancelledError:
+        return  # a later photo in the same album superseded this timer
+    finally:
+        _album_tasks.pop(group_key, None)
+
+    pending = _album_buffers.pop(group_key, None)
+    if pending is None or pending.caption_message is None:
+        return  # no /events_table caption ever arrived — an ordinary photo
+
+    match = _EVENTS_TABLE_CAPTION_RE.match(pending.caption_message.caption or "")
+    if not match:
+        return
+    tab_name = (match.group(1) or "").strip()
+    reply_target = pending.caption_message
+    if not tab_name:
+        await reply_target.answer(render_events_table_usage())
+        return
+
+    file_client = TelegramFileClient(deps.settings.telegram_bot_token)
+    images: list[ImageInput] = []
+    for file_id in pending.file_ids:
+        try:
+            data = await file_client.download(file_id)
+        except TelegramFileError as exc:
+            log.warning("events_table: failed to download photo %s: %s", file_id, exc)
+            continue
+        images.append(
+            ImageInput(media_type="image/jpeg", data_base64=base64.b64encode(data).decode())
+        )
+    if not images:
+        await reply_target.answer(render_events_table_usage())
+        return
+
+    await reply_target.answer(render_events_table_started(tab_name))
+    enqueue_parse_events_table(
+        deps.llm_queue,
+        chat_id=reply_target.chat.id,
+        user_id=reply_target.from_user.id,
+        is_group=reply_target.chat.type in _GROUP_TYPES,
+        tab_name=tab_name,
+        images=images,
+        job_timeout=int(deps.settings.events_table_timeout_s) + 60,
+    )
+
+
+@router.callback_query(F.data.startswith("evtable_yes:"))
+async def on_events_table_confirm(callback: CallbackQuery, deps: Deps) -> None:
+    session_id = callback.data.removeprefix("evtable_yes:")
+    result = await confirm_events_table(deps, session_id=session_id, user_id=callback.from_user.id)
+    await callback.answer()
+    if not result.ok:
+        await callback.message.answer(render_events_table_expired())
+        return
+    await callback.message.edit_text(render_events_table_saved(result.count))
+
+
+@router.callback_query(F.data.startswith("evtable_no:"))
+async def on_events_table_cancel(callback: CallbackQuery, deps: Deps) -> None:
+    session_id = callback.data.removeprefix("evtable_no:")
+    cancelled = await cancel_events_table(
+        deps, session_id=session_id, user_id=callback.from_user.id
+    )
+    await callback.answer()
+    if not cancelled:
+        await callback.message.answer(render_events_table_expired())
+        return
+    await callback.message.edit_text(render_events_table_cancelled())

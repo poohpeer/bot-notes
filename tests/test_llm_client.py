@@ -7,6 +7,7 @@ import pytest
 
 from notes_bot.clients.llm import (
     FakeLLMClient,
+    ImageInput,
     LLMResult,
     LLMServiceError,
     NullLLMClient,
@@ -51,7 +52,9 @@ async def test_fake_client_replies_by_prompt_substring():
 async def test_fake_client_records_calls():
     client = FakeLLMClient()
     await client.complete(system="sys", user="usr", json_schema={"type": "object"})
-    assert client.calls == [{"system": "sys", "user": "usr", "json_schema": {"type": "object"}}]
+    assert client.calls == [
+        {"system": "sys", "user": "usr", "json_schema": {"type": "object"}, "images": None}
+    ]
 
 
 async def test_proxy_client_sends_provider_codex_and_text_format():
@@ -244,3 +247,43 @@ def test_extract_token_usage_reads_claude_code_raw_envelope():
         },
     }
     assert extract_token_usage(usage) == (2, 4)
+
+
+async def test_images_go_straight_to_claude_code_never_codex():
+    """Confirmed live: codex answers 400 unsupported_image_input for any
+    images-bearing request — see ImageInput's own docstring. An
+    images-bearing call must never even attempt codex first."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        calls.append(body["provider"])
+        return _ok("described", model="claude-sonnet-5")
+
+    image = ImageInput(media_type="image/png", data_base64="Zm9v")
+    result = await _client(handler).complete(system="s", user="u", images=[image])
+    assert calls == ["claude_code"]
+    assert result.text == "described"
+
+
+async def test_images_are_serialized_into_the_request_body():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return _ok("ok")
+
+    image = ImageInput(media_type="image/jpeg", data_base64="Zm9v")
+    await _client(handler).complete(system="s", user="u", images=[image])
+    assert seen["body"]["images"] == [{"media_type": "image/jpeg", "data_base64": "Zm9v"}]
+
+
+async def test_no_images_sends_a_null_images_field():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.read())
+        return _ok("ok")
+
+    await _client(handler).complete(system="s", user="u")
+    assert seen["body"]["images"] is None

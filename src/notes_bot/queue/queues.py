@@ -8,7 +8,8 @@ from __future__ import annotations
 from redis import Redis
 from rq import Queue
 
-from notes_bot.queue.tasks import process_note, smart_answer
+from notes_bot.clients.llm import ImageInput
+from notes_bot.queue.tasks import parse_events_table, process_note, smart_answer
 
 
 def get_queues(redis_conn: Redis) -> dict[str, Queue]:
@@ -48,3 +49,29 @@ def enqueue_smart_answer(
     about a note existing once; a `/smart_search` call is a one-off action,
     and two of them in a row from an impatient user should both answer)."""
     llm_queue.enqueue(smart_answer, user_id, chat_id, is_group_chat, query_text)
+
+
+def enqueue_parse_events_table(
+    llm_queue: Queue,
+    *,
+    chat_id: int,
+    user_id: int,
+    is_group: bool,
+    tab_name: str,
+    images: list[ImageInput],
+    job_timeout: int,
+) -> None:
+    """No deterministic job_id, same reasoning as enqueue_smart_answer — a
+    one-off action, not persisted data with a dedup key. `job_timeout` is
+    the caller's own settings.events_table_timeout_s plus headroom
+    (RQ's own default, 180s, would kill the job before the LLM call's own
+    longer timeout ever fires)."""
+    llm_queue.enqueue(
+        parse_events_table,
+        chat_id=chat_id,
+        user_id=user_id,
+        is_group=is_group,
+        tab_name=tab_name,
+        images=images,
+        job_timeout=job_timeout,
+    )

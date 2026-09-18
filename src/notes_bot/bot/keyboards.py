@@ -10,6 +10,8 @@ build or test one. Callback data formats:
     delyes:{note_id}      confirmed delete
     delno:{note_id}       cancelled delete
     restore:{note_id}     restore from /trash
+    evtable_yes:{session_id}   /events_table — confirm, create the notes
+    evtable_no:{session_id}    /events_table — cancel, discard the parse
 """
 
 from __future__ import annotations
@@ -57,6 +59,19 @@ def delete_confirm_keyboard(note_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="Да, удалить", callback_data=f"delyes:{note_id}"),
                 InlineKeyboardButton(text="Отмена", callback_data=f"delno:{note_id}"),
+            ]
+        ]
+    )
+
+
+def events_table_confirm_keyboard(session_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Сохранить", callback_data=f"evtable_yes:{session_id}"
+                ),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"evtable_no:{session_id}"),
             ]
         ]
     )
