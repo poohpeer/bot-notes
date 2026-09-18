@@ -830,6 +830,32 @@ async def test_confirm_events_table_skips_an_exact_duplicate_silently(db_engine,
         assert len(notes) == 1  # the resend created nothing new
 
 
+async def test_confirm_events_table_never_dedups_within_the_same_run(db_engine, redis_client):
+    """Two genuinely different events sharing a (date_start, date_end,
+    type) key *within one run* (e.g. two unrelated entries on the same
+    day, both classified "event") must both be added — dedup only ever
+    applies against notes from a *previous* run, never siblings from the
+    batch currently being confirmed."""
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=[],
+        events=[
+            ExtractedEvent(date_start="30/11/2026", date_end="30/11/2026", type="event", text="a"),
+            ExtractedEvent(date_start="30/11/2026", date_end="30/11/2026", type="event", text="b"),
+        ],
+    )
+
+    result = await confirm_events_table(deps, session_id=session_id, user_id=1)
+
+    assert result.created == 2
+    assert result.skipped_exact == 0
+    assert result.conflicts == []
+
+
 async def test_confirm_events_table_flags_a_same_key_different_text_as_a_conflict(
     db_engine, redis_client
 ):

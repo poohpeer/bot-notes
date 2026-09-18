@@ -349,7 +349,7 @@ async def test_set_tags_and_skip_enrich(db_session):
     assert refreshed.enrich_status == "skipped"
 
 
-async def test_find_table_event_by_key_matches_date_range_and_type(db_session):
+async def test_list_table_events_returns_only_that_chat_s_table_events(db_session):
     repo = NoteRepository(db_session)
     note = await repo.create_note(
         user_id=1,
@@ -365,39 +365,27 @@ async def test_find_table_event_by_key_matches_date_range_and_type(db_session):
         ["экзамен"],
         structured={"date_start": "01/09/2026", "date_end": "01/09/2026", "type": "exam"},
     )
+    await repo.create_note(
+        user_id=1,
+        chat_id=2,
+        is_group=False,
+        tg_message_id=None,
+        source_type="table_event",
+        raw_text="other chat",
+        visibility="private",
+    )
     await db_session.flush()
 
-    found = await repo.find_table_event_by_key(
-        1, date_start="01/09/2026", date_end="01/09/2026", type="exam"
-    )
-    assert found is not None
-    assert found.id == note.id
-
-    assert (
-        await repo.find_table_event_by_key(
-            1, date_start="01/09/2026", date_end="01/09/2026", type="holiday"
-        )
-        is None
-    )
-    assert (
-        await repo.find_table_event_by_key(
-            2, date_start="01/09/2026", date_end="01/09/2026", type="exam"
-        )
-        is None
-    )
+    found = await repo.list_table_events(1)
+    assert [n.id for n in found] == [note.id]
 
 
-async def test_find_table_event_by_key_ignores_other_source_types(db_session):
+async def test_list_table_events_ignores_other_source_types(db_session):
     repo = NoteRepository(db_session)
     await repo.create_text_note(
         user_id=1, chat_id=1, is_group=False, tg_message_id=250, raw_text="x", visibility="private"
     )
-    assert (
-        await repo.find_table_event_by_key(
-            1, date_start="01/09/2026", date_end="01/09/2026", type="exam"
-        )
-        is None
-    )
+    assert await repo.list_table_events(1) == []
 
 
 async def test_replace_table_event_updates_text_tags_structured_and_status(db_session):

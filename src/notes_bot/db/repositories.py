@@ -275,34 +275,23 @@ class NoteRepository:
             .values(tags=tags, structured=structured, enrich_status="skipped")
         )
 
-    async def find_table_event_by_key(
-        self,
-        chat_id: int,
-        *,
-        date_start: str,
-        date_end: str,
-        type: str,  # noqa: A002
-    ) -> Note | None:
-        """/events_table's dedup key (03-ingest.md) - a live table can
-        legitimately change between two screenshots of the same tab (the
-        source itself warns "הלוח עשוי להשתנות"), so matching is scoped to
-        *this* date range + event type, not the note text: an exact-text
-        match is a true duplicate (confirm_events_table skips it silently),
-        a same-key-different-text match is an update (asks which to keep).
-        The most recent match wins if more than one somehow exists."""
+    async def list_table_events(self, chat_id: int) -> list[Note]:
+        """All of this chat's `table_event` notes, for confirm_events_table
+        to build its dedup snapshot from *before* it starts creating any
+        notes for the current run (03-ingest.md, "уже существует") - a
+        single upfront query, never a per-event lookup against the same
+        session that's mid-batch-inserting, so two genuinely different
+        events sharing a (date_start, date_end, type) key *within one run*
+        (e.g. two unrelated entries on the same day) never see each other
+        as an "existing" match. Only cross-run repeats dedup."""
         result = await self._session.execute(
-            select(Note)
-            .where(
+            select(Note).where(
                 Note.chat_id == chat_id,
                 Note.source_type == "table_event",
                 Note.deleted_at.is_(None),
-                Note.structured["date_start"].astext == date_start,
-                Note.structured["date_end"].astext == date_end,
-                Note.structured["type"].astext == type,
             )
-            .order_by(Note.id.desc())
         )
-        return result.scalars().first()
+        return list(result.scalars().all())
 
     async def replace_table_event(
         self, note_id: int, *, raw_text: str, tags: list[str], structured: dict

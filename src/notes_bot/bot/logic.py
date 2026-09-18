@@ -18,6 +18,7 @@ from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.clients.translate import HttpTranslateClient, TranslateServiceError
 from notes_bot.config import Settings
+from notes_bot.db.models import Note
 from notes_bot.db.repositories import ChatSettingsRepository, NoteRepository, UserSettingsRepository
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
@@ -565,7 +566,14 @@ async def confirm_events_table(
     change between two screenshots of the same tab (it says so itself:
     "הלוח עשוי להשתנות"). An exact text match is a true duplicate, skipped
     silently; a same-key-different-text match is a real conflict, deferred
-    to `resolve_events_table_conflict` rather than guessed at here."""
+    to `resolve_events_table_conflict` rather than guessed at here.
+
+    The dedup snapshot is fetched once, *before* this run creates anything
+    - two different events sharing a key within the *same* run (e.g. two
+    unrelated entries on the same day, both classified the same type) are
+    never checked against each other, only against notes that already
+    existed before this run started. Every event in the current batch is
+    added unconditionally."""
     if deps.pending_events_cache is None:
         return ConfirmEventsTableResult(ok=False)
     pending = await deps.pending_events_cache.get(session_id)
@@ -579,6 +587,18 @@ async def confirm_events_table(
             settings_row = await UserSettingsRepository(session).get_or_create(pending.user_id)
             visibility = settings_row.default_visibility
 
+        existing_by_key: dict[tuple[str, str, str], Note] = {}
+        for existing_note in await note_repo.list_table_events(pending.chat_id):
+            structured_existing = existing_note.structured or {}
+            key = (
+                structured_existing.get("date_start"),
+                structured_existing.get("date_end"),
+                structured_existing.get("type"),
+            )
+            prior = existing_by_key.get(key)
+            if prior is None or existing_note.id > prior.id:
+                existing_by_key[key] = existing_note
+
         created_ids: list[int] = []
         skipped_exact = 0
         conflicts: list[PendingConflict] = []
@@ -591,12 +611,7 @@ async def confirm_events_table(
             }
             tags = sorted({event.tag, *pending.topic_tags})
 
-            existing = await note_repo.find_table_event_by_key(
-                pending.chat_id,
-                date_start=event.date_start,
-                date_end=event.date_end,
-                type=event.type,
-            )
+            existing = existing_by_key.get((event.date_start, event.date_end, event.type))
             if existing is not None:
                 if existing.raw_text == event.note_text:
                     skipped_exact += 1

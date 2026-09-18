@@ -300,10 +300,15 @@ async def process_note_async(
             stage_timings["save"] = time.perf_counter() - stage_started
             log.info("process_note: note_id=%s done, chunks=%d", note_id, len(new_chunks))
 
-            if sender is not None:
+            if sender is not None and source_type != "table_event":
                 # /debug (03-ingest.md, "Debug: время обработки") — opt-in,
                 # so this check is a cheap SELECT for every note whose owner
                 # never turned it on, not a reason to skip the check.
+                # table_event is excluded: /events_table creates many notes
+                # in one confirm, each processed as its own independent
+                # process_note job, so a per-note message here would flood
+                # the chat with one "Обработка завершена" per event instead
+                # of the single "Сохранил N заметок" confirm already sends.
                 if await UserSettingsRepository(session).is_debug_enabled(user_id):
                     elapsed_s = time.perf_counter() - started
                     summary = None

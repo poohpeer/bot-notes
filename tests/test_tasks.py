@@ -637,6 +637,30 @@ async def test_process_note_indexes_a_table_event_note_like_a_text_note(factory)
     assert client.calls == [["01/09/2026: מבחן עברית"]]
 
 
+async def test_process_note_sends_no_debug_notification_for_table_event(factory):
+    """/events_table creates many table_event notes per confirm, each
+    processed as its own independent process_note job — a per-note debug
+    message here would flood the chat with one per event instead of the
+    single "Сохранил N заметок" the confirm already sends."""
+    note_id = await factory.insert_pending_note(
+        source_type="table_event", raw_text="01/09/2026: מבחן עברית"
+    )
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id, session_factory=factory, embedding_client=FakeEmbeddingClient(), sender=sender
+    )
+
+    assert sender.sent == []
+
+    async with factory() as session:
+        await UserSettingsRepository(session).toggle_debug(user_id=1)
+        await session.commit()
+
+
 async def test_process_note_never_enqueues_enrich_for_table_event(factory):
     """set_tags_and_skip_enrich (called by logic.confirm_events_table,
     before process_note ever runs) already set the tags this note should
