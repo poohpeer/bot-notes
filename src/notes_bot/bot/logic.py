@@ -387,8 +387,15 @@ def _to_renderable_from_note(note, chunk_text: str) -> RenderableHit:
 
 
 def _to_renderable_own(note) -> RenderableHit:
-    """/list and /trash only ever show the caller's own notes — unlike a
-    search hit, ownership here is a given, not something to check."""
+    """/list and /trash in a private chat only ever show the caller's own
+    notes — unlike a search hit, ownership here is a given, not something
+    to check."""
+    return _note_to_renderable(note, is_owner=True)
+
+
+def _note_to_renderable(note, *, is_owner: bool) -> RenderableHit:
+    """Distinct from `_to_renderable` (search hits, above) — a plain
+    `Note` row from /list-style pagination, not a `SearchHit`."""
     return RenderableHit(
         note_id=note.id,
         title=note.title,
@@ -396,7 +403,7 @@ def _to_renderable_own(note) -> RenderableHit:
         source_url=note.source_url,
         tags=note.tags,
         chunk_text=note.extracted_text or note.raw_text or "",
-        is_owner=True,
+        is_owner=is_owner,
         structured=note.structured,
     )
 
@@ -420,6 +427,29 @@ async def list_notes(deps: Deps, *, user_id: int, offset: int) -> NotesPage:
     page = notes[:page_size]
     return NotesPage(
         hits=[_to_renderable_own(n) for n in page],
+        has_more=has_more,
+        next_offset=offset + page_size,
+    )
+
+
+async def list_group_notes(
+    deps: Deps, *, chat_id: int, viewer_user_id: int, offset: int
+) -> NotesPage:
+    """`/list` in a group (ADR-10) — every note captured in *this room*,
+    not just the caller's own. `is_owner` is computed per note (viewer vs.
+    the note's actual saver) so `_send_notes_page` only renders a delete
+    button on notes the caller can actually delete — see
+    `NoteRepository.list_group`'s own docstring for why this isn't
+    `list_notes` with an extra filter."""
+    page_size = deps.settings.search_page_size
+    async with deps.session_factory() as session:
+        notes = await NoteRepository(session).list_group(
+            chat_id, limit=page_size + 1, offset=offset
+        )
+    has_more = len(notes) > page_size
+    page = notes[:page_size]
+    return NotesPage(
+        hits=[_note_to_renderable(n, is_owner=n.user_id == viewer_user_id) for n in page],
         has_more=has_more,
         next_offset=offset + page_size,
     )

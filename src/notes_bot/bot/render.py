@@ -299,11 +299,21 @@ def render_smart_answer_failed() -> str:
 
 
 def render_group_welcome() -> str:
+    """07-decisions.md's ADR-10 update (2026-09-18): plain @-mentions do
+    NOT reach the bot while Telegram's group privacy mode is on (only
+    commands and replies do) - verified live, contradicting the ADR's
+    original assumption. Without this line an admin who never touches
+    BotFather sees mentions silently do nothing, with no way to tell
+    whether the bot is broken or just never got the message."""
     return (
         "Привет! Я сохраняю заметки с поиском по смыслу. В этой группе я "
         "запоминаю только то, что адресовано мне — упомяните меня (@) или "
         "ответьте на моё сообщение, и я сохраню текст. Обычный разговор "
-        "участников я не трогаю."
+        "участников я не трогаю.\n\n"
+        "Важно: чтобы упоминания вообще доходили до меня, отключите "
+        "Group Privacy в настройках бота у @BotFather (Bot Settings → "
+        "Group Privacy → Disable) — иначе Telegram будет пропускать "
+        "команды и ответы мне, но не обычные сообщения с упоминанием."
     )
 
 
@@ -324,6 +334,15 @@ def render_list_empty() -> str:
 
 def render_trash_empty() -> str:
     return "Корзина пуста."
+
+
+def render_private_only() -> str:
+    """/trash (and delete/restore) stay private-chat-only — unlike /list
+    (which got a group-scoped variant, see logic.list_group_notes), a
+    room's shared trash of soft-deleted notes isn't something every member
+    should see. Previously this silently did nothing in a group; an
+    explicit reply is cheaper than a confused "почему не работает" report."""
+    return "Доступно только в личных сообщениях с ботом."
 
 
 def render_delete_confirmation_prompt() -> str:

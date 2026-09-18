@@ -425,6 +425,47 @@ async def test_list_own_respects_limit_and_offset(db_session):
     assert {n.id for n in page1}.isdisjoint({n.id for n in page2})
 
 
+async def test_list_group_returns_notes_from_any_member_in_that_chat(db_session):
+    """ADR-10: group notes have no `visibility` — the whole room, not just
+    the caller, so /list there must show notes saved by *any* member."""
+    repo = NoteRepository(db_session)
+    first = await repo.create_text_note(
+        user_id=1, chat_id=-100, is_group=True, tg_message_id=600, raw_text="a", visibility=None
+    )
+    second = await repo.create_text_note(
+        user_id=2, chat_id=-100, is_group=True, tg_message_id=601, raw_text="b", visibility=None
+    )
+    notes = await repo.list_group(-100, limit=10, offset=0)
+    assert [n.id for n in notes] == [second.id, first.id]
+
+
+async def test_list_group_excludes_other_chats_and_deleted(db_session):
+    repo = NoteRepository(db_session)
+    mine = await repo.create_text_note(
+        user_id=1, chat_id=-100, is_group=True, tg_message_id=602, raw_text="a", visibility=None
+    )
+    deleted = await repo.create_text_note(
+        user_id=1, chat_id=-100, is_group=True, tg_message_id=603, raw_text="b", visibility=None
+    )
+    await repo.soft_delete(deleted.id, 1)
+    await repo.create_text_note(
+        user_id=1, chat_id=-200, is_group=True, tg_message_id=604, raw_text="c", visibility=None
+    )
+    notes = await repo.list_group(-100, limit=10, offset=0)
+    assert [n.id for n in notes] == [mine.id]
+
+
+async def test_list_group_does_not_include_a_private_note_in_the_same_chat_id(db_session):
+    """`is_group` gates this, not just `chat_id` — a private note happens
+    to share its chat_id with the user's own DM, never a room's listing."""
+    repo = NoteRepository(db_session)
+    await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=605, raw_text="dm", visibility="private"
+    )
+    notes = await repo.list_group(1, limit=10, offset=0)
+    assert notes == []
+
+
 async def test_soft_delete_then_list_own_deleted(db_session):
     repo = NoteRepository(db_session)
     note = await repo.create_text_note(

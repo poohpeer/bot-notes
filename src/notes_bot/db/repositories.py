@@ -290,6 +290,27 @@ class NoteRepository:
         )
         return list(result.scalars())
 
+    async def list_group(self, chat_id: int, *, limit: int, offset: int) -> list[Note]:
+        """`/list` in a group (ADR-10) — every note captured *in that room*,
+        regardless of who saved it: group notes have no `visibility`
+        (ADR-5/ADR-10 — group membership is the scope, not a private/public
+        flag), so this is not `list_own` filtered further, it's a
+        different scope entirely. Deliberately NOT `Note.user_id ==` — a
+        member should see what the room already has, not just their own
+        contributions to it."""
+        result = await self._session.execute(
+            select(Note)
+            .where(
+                Note.chat_id == chat_id,
+                Note.is_group.is_(True),
+                Note.deleted_at.is_(None),
+            )
+            .order_by(Note.created_at.desc(), Note.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(result.scalars())
+
     async def list_own_deleted(self, user_id: int, *, limit: int, offset: int) -> list[Note]:
         result = await self._session.execute(
             select(Note)

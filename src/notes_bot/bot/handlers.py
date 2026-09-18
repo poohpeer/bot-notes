@@ -4,8 +4,11 @@ Telegram objects and delegates every decision to the pure logic layer.
 Private chats: text, page/YouTube/map/Instagram links, voice messages,
 /search + /search_mine + /search_all, /list + /trash + delete + restore,
 editing (via Telegram's own message-edit, see on_edited_message).
-Groups: capture on mention/reply (ADR-10), a welcome message on join,
-/capture_all + /capture_mentions, and the same /search.
+Groups: capture on mention/reply — both a new message and an edit of one,
+see on_group_message_edited — (ADR-10), a welcome message on join,
+/capture_all + /capture_mentions, the same /search, and /list scoped to
+the room (on_list_group — never a member's own private-chat notes, see
+NoteRepository.list_group). /trash stays private-only.
 
 Known gap: 03-ingest.md's flow diagram has the worker notify the bot when a
 note finishes processing, and — for voice specifically — "Бот отвечает на
@@ -19,6 +22,8 @@ UX touch.
 """
 
 from __future__ import annotations
+
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -39,6 +44,7 @@ from notes_bot.bot.logic import (
     NotesPage,
     delete_note,
     edit_note_by_message,
+    list_group_notes,
     list_notes,
     list_trash,
     restore_note,
@@ -65,6 +71,7 @@ from notes_bot.bot.render import (
     render_note_restored,
     render_note_saved,
     render_privacy_toggle_confirmation,
+    render_private_only,
     render_search_card,
     render_search_expired,
     render_search_summary_card,
@@ -74,6 +81,8 @@ from notes_bot.bot.render import (
 )
 from notes_bot.db.repositories import ChatSettingsRepository, UserSettingsRepository
 from notes_bot.domain.group_capture import Entity, mentions_bot, should_capture_group_message
+
+log = logging.getLogger(__name__)
 
 router = Router(name="notes")
 
@@ -330,6 +339,23 @@ async def on_capture_mentions(message: Message, deps: Deps) -> None:
 
 @router.message(F.chat.type.in_(_GROUP_TYPES), F.text, ~F.text.startswith("/"))
 async def on_group_message(message: Message, deps: Deps) -> None:
+    await _maybe_capture_group_message(message, deps, event="message")
+
+
+@router.edited_message(F.chat.type.in_(_GROUP_TYPES), F.text, ~F.text.startswith("/"))
+async def on_group_message_edited(message: Message, deps: Deps) -> None:
+    """A message that starts as a plain notice and gets edited to add
+    "@botname" (or turned into a reply — not applicable here, Telegram
+    doesn't let you add a reply-link after sending) must still be
+    capturable, or "мешенить постфактум" quietly does nothing — observed
+    live: a group member edited a message to prepend the bot's mention,
+    and it never reached any handler (aiogram logged the update itself as
+    "not handled" — no filter matched at all, since only the private-chat
+    edited_message handler existed before this one)."""
+    await _maybe_capture_group_message(message, deps, event="edited_message")
+
+
+async def _maybe_capture_group_message(message: Message, deps: Deps, *, event: str) -> None:
     async with deps.session_factory() as session:
         capture_mode = await ChatSettingsRepository(session).get_capture_mode(message.chat.id)
 
@@ -342,10 +368,24 @@ async def on_group_message(message: Message, deps: Deps) -> None:
         and message.reply_to_message.from_user is not None
         and message.reply_to_message.from_user.id == message.bot.id
     )
-
-    if not should_capture_group_message(
+    should_capture = should_capture_group_message(
         capture_mode=capture_mode, mentions_bot=is_mention, is_reply_to_bot=is_reply_to_bot
-    ):
+    )
+    # Diagnostic trail for "почему это не сохранилось" reports — the only
+    # prior signal was aiogram's own "Update is/isn't handled" log line,
+    # which doesn't say *why* a matched handler chose not to capture.
+    log.info(
+        "group capture: event=%s chat_id=%s msg_id=%s mode=%s mentions_bot=%s "
+        "is_reply_to_bot=%s capture=%s",
+        event,
+        message.chat.id,
+        message.message_id,
+        capture_mode,
+        is_mention,
+        is_reply_to_bot,
+        should_capture,
+    )
+    if not should_capture:
         return
 
     result = await save_note(
@@ -368,19 +408,38 @@ async def on_group_message(message: Message, deps: Deps) -> None:
 
 @router.message(Command("list"), F.chat.type == "private")
 async def on_list(message: Message, deps: Deps) -> None:
-    # Private-chat only: this lists every one of the caller's own notes,
-    # including private ones — running it in a group would broadcast their
-    # titles/snippets to everyone there. (listmore:/trashmore: callbacks
-    # only ever originate from a message this handler itself sent, so they
-    # need no separate chat-type guard.)
+    # Private chat: every one of the caller's own notes, including private
+    # ones — see on_list_group below for the group variant, which is
+    # scoped to the room instead (never a user's private DMs' notes).
     page = await list_notes(deps, user_id=message.from_user.id, offset=0)
+    await _send_notes_page(message, page, is_trash=False)
+
+
+@router.message(Command("list"), F.chat.type.in_(_GROUP_TYPES))
+async def on_list_group(message: Message, deps: Deps) -> None:
+    # Deliberately NOT list_notes(user_id=...): that would broadcast the
+    # caller's own private DMs' notes into the room. list_group_notes is
+    # scoped to notes captured in *this* chat_id only (NoteRepository.
+    # list_group's own docstring) — what ADR-10 group capture actually put
+    # there, from any member.
+    page = await list_group_notes(
+        deps, chat_id=message.chat.id, viewer_user_id=message.from_user.id, offset=0
+    )
     await _send_notes_page(message, page, is_trash=False)
 
 
 @router.callback_query(F.data.startswith("listmore:"))
 async def on_list_more(callback: CallbackQuery, deps: Deps) -> None:
     offset = int(callback.data.removeprefix("listmore:"))
-    page = await list_notes(deps, user_id=callback.from_user.id, offset=offset)
+    if callback.message.chat.type in _GROUP_TYPES:
+        page = await list_group_notes(
+            deps,
+            chat_id=callback.message.chat.id,
+            viewer_user_id=callback.from_user.id,
+            offset=offset,
+        )
+    else:
+        page = await list_notes(deps, user_id=callback.from_user.id, offset=offset)
     await callback.answer()
     await _send_notes_page(callback.message, page, is_trash=False)
 
@@ -389,6 +448,15 @@ async def on_list_more(callback: CallbackQuery, deps: Deps) -> None:
 async def on_trash(message: Message, deps: Deps) -> None:
     page = await list_trash(deps, user_id=message.from_user.id, offset=0)
     await _send_notes_page(message, page, is_trash=True)
+
+
+@router.message(Command("trash"), F.chat.type.in_(_GROUP_TYPES))
+async def on_trash_group(message: Message) -> None:
+    # A room's shared trash of soft-deleted notes isn't something every
+    # member should see — unlike /list, this stays private-only. Previously
+    # this command just silently did nothing in a group; an explicit reply
+    # beats a "why doesn't this work" report.
+    await message.reply(render_private_only())
 
 
 @router.callback_query(F.data.startswith("trashmore:"))
@@ -404,7 +472,14 @@ async def _send_notes_page(message: Message, page: NotesPage, *, is_trash: bool)
         await message.answer(render_trash_empty() if is_trash else render_list_empty())
         return
     for hit in page.hits:
-        keyboard = trash_item_keyboard(hit.note_id) if is_trash else list_item_keyboard(hit.note_id)
+        if is_trash:
+            keyboard = trash_item_keyboard(hit.note_id)
+        else:
+            # Group /list can show notes saved by other members — only the
+            # actual owner gets a delete button (soft_delete's own WHERE
+            # clause is the real check; this is the same rendering
+            # convenience as render_search_card's is_owner gate).
+            keyboard = list_item_keyboard(hit.note_id) if hit.is_owner else None
         await message.answer(render_search_card(hit), reply_markup=keyboard, parse_mode="HTML")
     if page.has_more:
         more_keyboard = (

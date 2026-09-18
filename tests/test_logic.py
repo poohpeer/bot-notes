@@ -12,6 +12,7 @@ from notes_bot.bot.logic import (
     delete_note,
     edit_note_by_message,
     edit_note_text,
+    list_group_notes,
     list_notes,
     list_trash,
     restore_note,
@@ -242,6 +243,36 @@ async def test_list_notes_has_more_when_over_page_size(deps):
 async def test_list_notes_excludes_other_users(deps):
     await save_note(deps, user_id=2, chat_id=2, is_group=False, tg_message_id=50, text="not mine")
     page = await list_notes(deps, user_id=1, offset=0)
+    assert page.hits == []
+
+
+async def test_list_group_notes_shows_notes_from_any_member_of_the_room(deps):
+    mine = await save_note(deps, user_id=1, chat_id=-100, is_group=True, tg_message_id=70, text="a")
+    theirs = await save_note(
+        deps, user_id=2, chat_id=-100, is_group=True, tg_message_id=71, text="b"
+    )
+    page = await list_group_notes(deps, chat_id=-100, viewer_user_id=1, offset=0)
+    assert {h.note_id for h in page.hits} == {mine.note_id, theirs.note_id}
+
+
+async def test_list_group_notes_marks_ownership_per_note(deps):
+    mine = await save_note(deps, user_id=1, chat_id=-100, is_group=True, tg_message_id=72, text="a")
+    theirs = await save_note(
+        deps, user_id=2, chat_id=-100, is_group=True, tg_message_id=73, text="b"
+    )
+    page = await list_group_notes(deps, chat_id=-100, viewer_user_id=1, offset=0)
+    by_id = {h.note_id: h for h in page.hits}
+    assert by_id[mine.note_id].is_owner is True
+    assert by_id[theirs.note_id].is_owner is False
+
+
+async def test_list_group_notes_excludes_the_callers_own_private_dm_notes(deps):
+    """The whole reason list_group_notes exists instead of list_notes with
+    an extra filter: a room's /list must never leak a member's own private
+    DM notes, which is exactly what running list_notes(user_id=...) in a
+    group would do."""
+    await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=74, text="private dm")
+    page = await list_group_notes(deps, chat_id=-100, viewer_user_id=1, offset=0)
     assert page.hits == []
 
 
