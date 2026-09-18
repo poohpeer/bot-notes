@@ -190,6 +190,60 @@ async def test_synthesizes_and_sends_an_answer_with_sources(factory):
     assert str(note_id) in text
 
 
+async def test_answer_body_is_wrapped_in_pre_but_sources_are_not(factory):
+    """04-search.md: a monospace block reads better for the itemized,
+    mixed-script answers this command tends to produce - but Telegram's
+    HTML mode forbids other entities (render_places' <a href> links)
+    inside a <pre>, so only the LLM's own text goes in there."""
+    await factory.insert_done_note(
+        title="Тбилиси видео",
+        raw_text="обзор мест",
+        source_type="youtube",
+        structured={"places": [{"name": "Кахелеби", "location_hint": "Кахетинское шоссе"}]},
+    )
+    llm = ScriptedLLMClient(text="05.11 — מבחן מתמטיקה")
+    sender = FakeSender()
+
+    await smart_answer_async(
+        user_id=1,
+        chat_id=1,
+        is_group_chat=False,
+        query_text="когда экзамены",
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        llm_client=llm,
+        llm_enabled=True,
+        timeout_s=10,
+        sender=sender,
+    )
+    _, text = sender.sent[0]
+    assert "<pre>05.11 — מבחן מתמטיקה</pre>" in text
+    sources_section = text.split("Источники:")[1]
+    assert "<pre>" not in sources_section
+    assert '<a href="https://www.google.com/maps/search/' in sources_section
+
+
+async def test_answer_body_html_special_chars_are_escaped_inside_pre(factory):
+    await factory.insert_done_note(title="t", raw_text="x")
+    llm = ScriptedLLMClient(text="a <b>bold</b> & stray < tag")
+    sender = FakeSender()
+
+    await smart_answer_async(
+        user_id=1,
+        chat_id=1,
+        is_group_chat=False,
+        query_text="q",
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        llm_client=llm,
+        llm_enabled=True,
+        timeout_s=10,
+        sender=sender,
+    )
+    _, text = sender.sent[0]
+    assert "<pre>a &lt;b&gt;bold&lt;/b&gt; &amp; stray &lt; tag</pre>" in text
+
+
 async def test_sources_include_extracted_places_as_maps_links(factory):
     """/smart_search shows no raw cards any more (04-search.md) — a video
     note's places (enrich.generate_places) only ever reach the user through

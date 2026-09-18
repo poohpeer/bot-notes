@@ -711,7 +711,14 @@ async def smart_answer_async(
         # render_places, from generate_places) ever reach the user.
         source_lines.extend(f"  {place_line}" for place_line in render_places(h.structured))
     sources = "\n".join(source_lines)
-    answer = f"{_esc(result.text)}\n\nИсточники:\n{sources}"
+    # <pre> around the answer body only, never the sources block below -
+    # Telegram's HTML mode forbids other entities (render_places' own
+    # <a href> links) inside a <pre>, and doesn't render markdown-style
+    # **bold** at all (rag_answer.md's own prompt asks the LLM not to try).
+    # A monospace block reads noticeably better than plain text for the
+    # itemized, mixed-script (Hebrew note content + Russian narrative)
+    # answers this command tends to produce - see 04-search.md.
+    answer = f"<pre>{_esc(result.text)}</pre>\n\nИсточники:\n{sources}"
     await sender.send(chat_id, answer, parse_mode="HTML")
 
     if debug_enabled:
