@@ -18,6 +18,10 @@ RUN uv sync --no-dev
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
+# One-off maintenance scripts (docs/architecture/03-ingest.md, "Бэкфилл
+# subjects") - not run by any CMD here, just baked in so they can be
+# `kubectl exec`'d against a live pod without a separate deploy path.
+COPY tools ./tools
 RUN uv sync --no-dev --no-editable
 
 # ---------------------------------------------------------------------------
