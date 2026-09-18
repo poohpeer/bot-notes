@@ -133,3 +133,30 @@ async def extract_events_table(
             )
 
     return ExtractedTable(topic_tags=tags, events=events)
+
+
+_SUBJECTS_SCHEMA = {
+    "type": "object",
+    "properties": {"subjects": {"type": "array", "items": {"type": "string"}}},
+    "required": ["subjects"],
+}
+
+
+async def extract_subjects_from_text(llm: LLMClient, text: str, *, timeout_s: float) -> list[str]:
+    """Text-only counterpart to `extract_events_table`'s own per-event
+    `subjects` field (03-ingest.md, "Бэкфилл subjects") - for table_event
+    notes created before that field existed, this backfills from the
+    note's own `raw_text` (already final, no screenshot needed) instead
+    of re-parsing the original table image."""
+    result = await llm.complete(
+        system=load_prompt("table_event_subjects"),
+        user=text,
+        json_schema=_SUBJECTS_SCHEMA,
+        timeout_s=timeout_s,
+    )
+    if result.parsed is None:
+        return []
+    subjects = result.parsed.get("subjects")
+    if not isinstance(subjects, list):
+        return []
+    return [s.strip().lower() for s in subjects if isinstance(s, str) and s.strip()]

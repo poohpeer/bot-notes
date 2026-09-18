@@ -306,6 +306,21 @@ class NoteRepository:
             .values(raw_text=raw_text, tags=tags, structured=structured, status="pending")
         )
 
+    async def merge_table_event_subjects(self, note_id: int, *, subjects: list[str]) -> None:
+        """One-off backfill (03-ingest.md, "Бэкфилл subjects") for
+        table_event notes created before /events_table started extracting
+        `subjects` - merges into the existing tags/structured rather than
+        replacing them, and never touches `status`: tags/structured don't
+        feed the vector, so no re-embed is needed."""
+        note = await self.get(note_id)
+        if note is None:
+            return
+        tags = sorted({*note.tags, *subjects})
+        structured = {**(note.structured or {}), "subjects": subjects}
+        await self._session.execute(
+            update(Note).where(Note.id == note_id).values(tags=tags, structured=structured)
+        )
+
     async def toggle_visibility(self, note_id: int, user_id: int) -> str | None:
         """Flips private<->public. Ownership is enforced in the WHERE clause
         of the UPDATE itself — zero rows affected means "not yours or

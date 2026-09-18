@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from notes_bot.clients.llm import ImageInput, LLMResult, NullLLMClient
-from notes_bot.events_table import ExtractedEvent, extract_events_table
+from notes_bot.events_table import ExtractedEvent, extract_events_table, extract_subjects_from_text
 
 
 class ScriptedLLMClient:
@@ -144,3 +144,15 @@ def test_extracted_event_tag_maps_type_to_russian():
     assert ExtractedEvent("d", "d", "exam", "t").tag == "экзамен"
     assert ExtractedEvent("d", "d", "holiday", "t").tag == "праздник"
     assert ExtractedEvent("d", "d", "event", "t").tag == "мероприятие"
+
+
+async def test_extract_subjects_from_text_parses_and_lowercases():
+    llm = ScriptedLLMClient({"subjects": ["Математика", "  ", 5]})
+    subjects = await extract_subjects_from_text(llm, "מבחן מתמטיקה", timeout_s=10)
+    assert subjects == ["математика"]
+    assert llm.calls[0]["user"] == "מבחן מתמטיקה"
+
+
+async def test_extract_subjects_from_text_empty_on_unparseable_response():
+    subjects = await extract_subjects_from_text(NullLLMClient(), "x", timeout_s=10)
+    assert subjects == []

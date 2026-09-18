@@ -413,6 +413,41 @@ async def test_replace_table_event_updates_text_tags_structured_and_status(db_se
     assert refreshed.status == "pending"  # needs re-embedding, same as any text edit
 
 
+async def test_merge_table_event_subjects_adds_to_tags_and_structured(db_session):
+    """tools/backfill_table_event_subjects.py's own write path — merges
+    into whatever's already there, never touches raw_text/status."""
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=None,
+        source_type="table_event",
+        raw_text="01/09/2026: מבחן מתמטיקה",
+        visibility="private",
+    )
+    await repo.set_tags_and_skip_enrich(
+        note.id,
+        ["экзамен"],
+        structured={"date_start": "01/09/2026", "date_end": "01/09/2026", "type": "exam"},
+    )
+    await repo.mark_done(note.id)
+
+    await repo.merge_table_event_subjects(note.id, subjects=["математика"])
+    await db_session.flush()
+
+    refreshed = await repo.get(note.id)
+    assert set(refreshed.tags) == {"экзамен", "математика"}
+    assert refreshed.structured["subjects"] == ["математика"]
+    assert refreshed.structured["type"] == "exam"  # existing keys survive the merge
+    assert refreshed.status == "done"  # no re-embed - tags/structured don't feed the vector
+
+
+async def test_merge_table_event_subjects_is_a_no_op_for_a_missing_note(db_session):
+    repo = NoteRepository(db_session)
+    await repo.merge_table_event_subjects(999999, subjects=["математика"])  # must not raise
+
+
 async def test_get_first_chunk_embedding_returns_the_lowest_index_chunk(db_session):
     repo = NoteRepository(db_session)
     chunk_repo = ChunkRepository(db_session)

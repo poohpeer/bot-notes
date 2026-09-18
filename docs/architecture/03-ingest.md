@@ -449,6 +449,21 @@ WHERE deleted_at IS NOT NULL
 создания заметки, поэтому `_extract_and_get_index_text` обрабатывает его
 как `'text'`: `raw_text` идёт в чанкинг и эмбеддинг как есть.
 
+### Бэкфилл subjects
+
+`subjects` появился не с первого дня `/events_table` - заметки, созданные
+раньше, у него нет вообще (`structured` без ключа `"subjects"`), и
+поисковый фильтр (`04-search.md`) для них - no-op, не отличает их от
+нерелевантных. `tools/backfill_table_event_subjects.py` - одноразовый
+скрипт: берёт все `table_event`-заметки без `subjects`, прогоняет их
+`raw_text` через текстовый (не vision) LLM-вызов
+(`events_table.extract_subjects_from_text`, тот же промпт-подход, что у
+`extract_events_table`, но без изображения - текст события уже
+самодостаточен) и мержит результат в `tags`/`structured`
+(`NoteRepository.merge_table_event_subjects`) - не трогая `raw_text` и
+`status`, эмбеддинг не зависит от тегов. Запускается вручную, не из
+приложения; `--dry-run` только логирует, ничего не пишет.
+
 ### /events_table - "уже существует"
 
 Присланные повторно те же скриншоты (случайно или потому что таблица
