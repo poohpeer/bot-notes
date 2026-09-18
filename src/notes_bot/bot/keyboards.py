@@ -12,6 +12,8 @@ build or test one. Callback data formats:
     restore:{note_id}     restore from /trash
     evtable_yes:{session_id}   /events_table — confirm, create the notes
     evtable_no:{session_id}    /events_table — cancel, discard the parse
+    evconflict_old:{session_id}:{index}   /events_table dedup — keep the existing note
+    evconflict_new:{session_id}:{index}   /events_table dedup — replace it with the new text
 """
 
 from __future__ import annotations
@@ -72,6 +74,21 @@ def events_table_confirm_keyboard(session_id: str) -> InlineKeyboardMarkup:
                     text="✅ Сохранить", callback_data=f"evtable_yes:{session_id}"
                 ),
                 InlineKeyboardButton(text="❌ Отмена", callback_data=f"evtable_no:{session_id}"),
+            ]
+        ]
+    )
+
+
+def events_table_conflict_keyboard(session_id: str, index: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Оставить старое", callback_data=f"evconflict_old:{session_id}:{index}"
+                ),
+                InlineKeyboardButton(
+                    text="Заменить новым", callback_data=f"evconflict_new:{session_id}:{index}"
+                ),
             ]
         ]
     )

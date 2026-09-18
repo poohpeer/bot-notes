@@ -32,6 +32,15 @@ async def test_extract_events_table_passes_images_and_tab_name_through():
     assert "שכבה י'" in llm.calls[0]["user"]
 
 
+async def test_extract_events_table_falls_back_to_a_generic_prompt_when_tab_name_is_empty():
+    """A screenshot needs no tab name (handlers.py's own docstring on why
+    it's optional) — but ai-proxy's `prompt` has a `min_length` of 1, so
+    the fallback must be non-empty."""
+    llm = ScriptedLLMClient({"topic_tags": [], "events": []})
+    await extract_events_table(llm, images=[_image()], tab_name="", timeout_s=10)
+    assert llm.calls[0]["user"]
+
+
 async def test_extract_events_table_parses_events_and_topic_tags():
     llm = ScriptedLLMClient(
         {

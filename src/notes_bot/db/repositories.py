@@ -253,7 +253,9 @@ class NoteRepository:
             update(Note).where(Note.id == note_id).values(enrich_status="skipped")
         )
 
-    async def set_tags_and_skip_enrich(self, note_id: int, tags: list[str]) -> None:
+    async def set_tags_and_skip_enrich(
+        self, note_id: int, tags: list[str], *, structured: dict
+    ) -> None:
         """`table_event` notes (03-ingest.md, "/events_table") already carry
         their own tags from the extraction call itself (event type +
         topic_tags) - `enrich_note`'s own `generate_tags` would overwrite
@@ -261,9 +263,58 @@ class NoteRepository:
         knowledge of the table's broader topic. `enrich_status='skipped'`
         here mirrors `mark_enrich_skipped` (process_note_async never
         enqueues `enrich_note` for this source_type in the first place, so
-        this is the value it settles on, not a race with a real run)."""
+        this is the value it settles on, not a race with a real run).
+
+        `structured` holds `{date_start, date_end, type}` - not shown to the
+        user (render_search_card only renders `structured["places"]`), it's
+        purely so `find_table_event_by_key` can match a re-parsed event
+        against one already saved without re-parsing its `raw_text`."""
         await self._session.execute(
-            update(Note).where(Note.id == note_id).values(tags=tags, enrich_status="skipped")
+            update(Note)
+            .where(Note.id == note_id)
+            .values(tags=tags, structured=structured, enrich_status="skipped")
+        )
+
+    async def find_table_event_by_key(
+        self,
+        chat_id: int,
+        *,
+        date_start: str,
+        date_end: str,
+        type: str,  # noqa: A002
+    ) -> Note | None:
+        """/events_table's dedup key (03-ingest.md) - a live table can
+        legitimately change between two screenshots of the same tab (the
+        source itself warns "הלוח עשוי להשתנות"), so matching is scoped to
+        *this* date range + event type, not the note text: an exact-text
+        match is a true duplicate (confirm_events_table skips it silently),
+        a same-key-different-text match is an update (asks which to keep).
+        The most recent match wins if more than one somehow exists."""
+        result = await self._session.execute(
+            select(Note)
+            .where(
+                Note.chat_id == chat_id,
+                Note.source_type == "table_event",
+                Note.deleted_at.is_(None),
+                Note.structured["date_start"].astext == date_start,
+                Note.structured["date_end"].astext == date_end,
+                Note.structured["type"].astext == type,
+            )
+            .order_by(Note.id.desc())
+        )
+        return result.scalars().first()
+
+    async def replace_table_event(
+        self, note_id: int, *, raw_text: str, tags: list[str], structured: dict
+    ) -> None:
+        """ "Заменить новым" on a dedup conflict (03-ingest.md) - same
+        `status='pending'` + re-embed pattern as `edit_text`/
+        `edit_text_by_message`: the note's vector must match its (now
+        updated) text before it's findable again."""
+        await self._session.execute(
+            update(Note)
+            .where(Note.id == note_id)
+            .values(raw_text=raw_text, tags=tags, structured=structured, status="pending")
         )
 
     async def toggle_visibility(self, note_id: int, user_id: int) -> str | None:

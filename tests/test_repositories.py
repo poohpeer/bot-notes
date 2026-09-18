@@ -340,11 +340,89 @@ async def test_set_tags_and_skip_enrich(db_session):
     note = await repo.create_text_note(
         user_id=1, chat_id=1, is_group=False, tg_message_id=204, raw_text="x", visibility="private"
     )
-    await repo.set_tags_and_skip_enrich(note.id, ["экзамен", "школа"])
+    structured = {"date_start": "01/09/2026", "date_end": "01/09/2026", "type": "exam"}
+    await repo.set_tags_and_skip_enrich(note.id, ["экзамен", "школа"], structured=structured)
     await db_session.flush()
     refreshed = await repo.get(note.id)
     assert refreshed.tags == ["экзамен", "школа"]
+    assert refreshed.structured == structured
     assert refreshed.enrich_status == "skipped"
+
+
+async def test_find_table_event_by_key_matches_date_range_and_type(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=None,
+        source_type="table_event",
+        raw_text="01/09/2026: מבחן עברית",
+        visibility="private",
+    )
+    await repo.set_tags_and_skip_enrich(
+        note.id,
+        ["экзамен"],
+        structured={"date_start": "01/09/2026", "date_end": "01/09/2026", "type": "exam"},
+    )
+    await db_session.flush()
+
+    found = await repo.find_table_event_by_key(
+        1, date_start="01/09/2026", date_end="01/09/2026", type="exam"
+    )
+    assert found is not None
+    assert found.id == note.id
+
+    assert (
+        await repo.find_table_event_by_key(
+            1, date_start="01/09/2026", date_end="01/09/2026", type="holiday"
+        )
+        is None
+    )
+    assert (
+        await repo.find_table_event_by_key(
+            2, date_start="01/09/2026", date_end="01/09/2026", type="exam"
+        )
+        is None
+    )
+
+
+async def test_find_table_event_by_key_ignores_other_source_types(db_session):
+    repo = NoteRepository(db_session)
+    await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=250, raw_text="x", visibility="private"
+    )
+    assert (
+        await repo.find_table_event_by_key(
+            1, date_start="01/09/2026", date_end="01/09/2026", type="exam"
+        )
+        is None
+    )
+
+
+async def test_replace_table_event_updates_text_tags_structured_and_status(db_session):
+    repo = NoteRepository(db_session)
+    note = await repo.create_note(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=None,
+        source_type="table_event",
+        raw_text="01/09/2026: старый текст",
+        visibility="private",
+    )
+    await repo.mark_done(note.id)
+    new_structured = {"date_start": "01/09/2026", "date_end": "01/09/2026", "type": "holiday"}
+    await repo.replace_table_event(
+        note.id, raw_text="01/09/2026: новый текст", tags=["праздник"], structured=new_structured
+    )
+    await db_session.flush()
+
+    refreshed = await repo.get(note.id)
+    assert refreshed.raw_text == "01/09/2026: новый текст"
+    assert refreshed.tags == ["праздник"]
+    assert refreshed.structured == new_structured
+    assert refreshed.status == "pending"  # needs re-embedding, same as any text edit
 
 
 async def test_get_first_chunk_embedding_returns_the_lowest_index_chunk(db_session):

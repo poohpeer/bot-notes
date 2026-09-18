@@ -74,10 +74,14 @@ async def extract_events_table(
 ) -> ExtractedTable:
     """Best-effort, same as every enrich.py function — a malformed or
     missing field is dropped, not raised; a garbled reply degrades to
-    fewer events found, not a failed command."""
+    fewer events found, not a failed command.
+
+    `tab_name` is optional (handlers.py's own docstring on why) — ai-proxy's
+    `prompt` field has a `min_length` of 1, so an empty tab name still needs
+    *some* non-empty instruction, not just "" or "Таб: "."""
     result = await llm.complete(
         system=load_prompt("events_table"),
-        user=f"Таб: {tab_name}",
+        user=f"Таб: {tab_name}" if tab_name else "Разбери таблицу на скриншоте(ах).",
         json_schema=_EVENTS_TABLE_SCHEMA,
         images=images,
         timeout_s=timeout_s,

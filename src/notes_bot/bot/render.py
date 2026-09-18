@@ -371,15 +371,27 @@ def render_edit_refused() -> str:
 
 
 def render_events_table_usage() -> str:
-    """A bare `/events_table`, no photos attached — see 03-ingest.md,
-    "/events_table". Mirrors /search's own "Использование: ..." reply for
-    an argument-less command, not silence."""
+    """A bare `/events_table`, no photos attached (or none downloadable) —
+    see 03-ingest.md, "/events_table". Mirrors /search's own
+    "Использование: ..." reply for an argument-less command, not silence.
+
+    Naming a tab is optional — one screenshot is already a single specific
+    view, unlike a multi-tab file (not supported yet) where naming one
+    would actually disambiguate something."""
     return (
         "Использование: пришлите один или несколько скриншотов таблицы "
-        "(альбомом, если их несколько) с подписью\n"
-        "/events_table <название таба>\n\n"
-        "Например: /events_table שכבה י'"
+        "(альбомом, если их несколько) с подписью /events_table\n\n"
+        "Можно добавить название - пригодится, если пришлёте несколько "
+        "похожих таблиц подряд:\n"
+        "/events_table שכבה י'"
     )
+
+
+def _table_label(tab_name: str) -> str:
+    """Tab names are optional (handlers.py's own docstring on why) — every
+    render_events_table_* message below either says "таблицу «X»" or just
+    "таблицу", never "таблицу «»"."""
+    return f' "{tab_name}"' if tab_name else ""
 
 
 def render_events_table_started(tab_name: str) -> str:
@@ -388,7 +400,7 @@ def render_events_table_started(tab_name: str) -> str:
     async on the `llm` queue and can take up to events_table_timeout_s
     (240с by default), so this stands in for a "typing" indicator that
     can't span that long."""
-    return f'🔎 Разбираю таблицу "{tab_name}"…'
+    return f"🔎 Разбираю таблицу{_table_label(tab_name)}…"
 
 
 def render_events_table_disabled() -> str:
@@ -396,7 +408,8 @@ def render_events_table_disabled() -> str:
 
 
 def render_events_table_empty(tab_name: str) -> str:
-    return f'Не нашёл ни одного события в табе "{tab_name}". Попробуйте более чёткий скриншот.'
+    label = _table_label(tab_name)
+    return f"Не нашёл ни одного события в таблице{label}. Попробуйте более чёткий скриншот."
 
 
 def render_events_table_preview(
@@ -407,15 +420,44 @@ def render_events_table_preview(
     attached — see 03-ingest.md, "/events_table". `type_counts` keys are
     the Russian tag names (events_table.ExtractedEvent.tag), so this
     doesn't need to know the English exam/holiday/event vocabulary."""
-    lines = [f'Нашёл {sum(type_counts.values())} событий в табе "{tab_name}":']
+    lines = [f"Нашёл {sum(type_counts.values())} событий в таблице{_table_label(tab_name)}:"]
     lines.extend(f"  {count} — {tag}" for tag, count in type_counts.items())
     if topic_tags:
         lines.append("Теги: " + ", ".join(f"#{t}" for t in topic_tags))
     return "\n".join(lines)
 
 
-def render_events_table_saved(count: int) -> str:
-    return f"Сохранил {count} заметок."
+def render_events_table_saved(*, created: int, skipped_exact: int, conflicts: int) -> str:
+    """03-ingest.md, "/events_table" - "уже существует": `skipped_exact`
+    is a silent no-op elsewhere (a true duplicate — same date range, type,
+    and text), so this is the only place the user ever learns it happened
+    at all. `conflicts` are reported here but resolved in their own,
+    separate messages (render_events_table_conflict) - this line just says
+    how many are still pending."""
+    lines = [f"Сохранил {created} заметок."]
+    if skipped_exact:
+        lines.append(f"Пропустил {skipped_exact} — уже есть, без изменений.")
+    if conflicts:
+        lines.append(f"{conflicts} событий отличаются от уже сохранённых — решите ниже.")
+    return "\n".join(lines)
+
+
+def render_events_table_conflict(*, old_text: str, new_text: str) -> str:
+    """One message per dedup conflict (03-ingest.md) - same date range and
+    event type as an existing table_event note, but different text (the
+    source table changed between two screenshots of the same tab, or the
+    new parse just read it differently). `keyboards.events_table_conflict_
+    keyboard` is attached alongside this."""
+    return (
+        "Уже есть заметка на эту дату с другим текстом:\n\n"
+        f"Было: {old_text}\n"
+        f"Стало: {new_text}\n\n"
+        "Что оставить?"
+    )
+
+
+def render_events_table_conflict_resolved(*, kept_new: bool) -> str:
+    return "Заменил новым." if kept_new else "Оставил старое."
 
 
 def render_events_table_cancelled() -> str:

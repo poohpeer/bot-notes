@@ -9,6 +9,16 @@ from notes_bot.bot.render import (
     render_delete_refused,
     render_edit_refused,
     render_edit_saved,
+    render_events_table_cancelled,
+    render_events_table_conflict,
+    render_events_table_conflict_resolved,
+    render_events_table_disabled,
+    render_events_table_empty,
+    render_events_table_expired,
+    render_events_table_preview,
+    render_events_table_saved,
+    render_events_table_started,
+    render_events_table_usage,
     render_group_note_saved,
     render_group_welcome,
     render_list_empty,
@@ -347,3 +357,74 @@ def test_delete_flow_messages():
 def test_edit_flow_messages():
     assert render_edit_saved()
     assert render_edit_refused()
+
+
+def test_events_table_usage_message():
+    assert render_events_table_usage()
+
+
+def test_events_table_started_mentions_the_tab_name_when_given():
+    assert 'таблицу "שכבה י\'"' in render_events_table_started("שכבה י'")
+
+
+def test_events_table_started_omits_the_tab_clause_when_empty():
+    text = render_events_table_started("")
+    assert text == "🔎 Разбираю таблицу…"
+
+
+def test_events_table_disabled_message():
+    assert render_events_table_disabled()
+
+
+def test_events_table_empty_mentions_the_tab_name_when_given():
+    assert 'таблице "t"' in render_events_table_empty("t")
+
+
+def test_events_table_empty_omits_the_tab_clause_when_empty():
+    assert "таблице." in render_events_table_empty("")
+
+
+def test_events_table_preview_lists_type_counts_and_topic_tags():
+    text = render_events_table_preview(
+        tab_name="t", topic_tags=["школа"], type_counts={"экзамен": 2, "праздник": 1}
+    )
+    assert "Нашёл 3 событий" in text
+    assert "2 — экзамен" in text
+    assert "1 — праздник" in text
+    assert "#школа" in text
+
+
+def test_events_table_preview_omits_tags_line_when_none():
+    text = render_events_table_preview(tab_name="t", topic_tags=[], type_counts={"экзамен": 1})
+    assert "Теги" not in text
+
+
+def test_events_table_saved_reports_created_skipped_and_conflicts():
+    text = render_events_table_saved(created=3, skipped_exact=2, conflicts=1)
+    assert "Сохранил 3" in text
+    assert "Пропустил 2" in text
+    assert "1 событий отличаются" in text
+
+
+def test_events_table_saved_omits_lines_with_nothing_to_report():
+    text = render_events_table_saved(created=3, skipped_exact=0, conflicts=0)
+    assert text == "Сохранил 3 заметок."
+
+
+def test_events_table_conflict_message_shows_both_texts():
+    text = render_events_table_conflict(old_text="было", new_text="стало")
+    assert "было" in text
+    assert "стало" in text
+
+
+def test_events_table_conflict_resolved_message():
+    assert "Заменил" in render_events_table_conflict_resolved(kept_new=True)
+    assert "Оставил" in render_events_table_conflict_resolved(kept_new=False)
+
+
+def test_events_table_cancelled_message():
+    assert render_events_table_cancelled()
+
+
+def test_events_table_expired_message():
+    assert render_events_table_expired()

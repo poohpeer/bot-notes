@@ -18,6 +18,7 @@ from notes_bot.bot.logic import (
     list_group_notes,
     list_notes,
     list_trash,
+    resolve_events_table_conflict,
     restore_note,
     run_search,
     save_note,
@@ -28,6 +29,7 @@ from notes_bot.bot.logic import (
     smart_search,
     toggle_privacy,
 )
+from notes_bot.clients.conflicts_cache import ConflictsCache, PendingConflict
 from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
 from notes_bot.clients.translate import TranslateServiceError
@@ -753,6 +755,7 @@ def _deps_with_events_cache(db_engine, redis_client) -> Deps:
         llm_queue=FakeQueue(),
         settings=_settings(),
         pending_events_cache=PendingEventsCache(redis_client),
+        conflicts_cache=ConflictsCache(redis_client),
     )
 
 
@@ -769,7 +772,9 @@ async def test_confirm_events_table_creates_one_note_per_event(db_engine, redis_
     result = await confirm_events_table(deps, session_id=session_id, user_id=1)
 
     assert result.ok is True
-    assert result.count == 2
+    assert result.created == 2
+    assert result.skipped_exact == 0
+    assert result.conflicts == []
     assert len(deps.fast_queue.calls) == 2
     assert await deps.pending_events_cache.get(session_id) is None
 
@@ -789,6 +794,197 @@ async def test_confirm_events_table_creates_one_note_per_event(db_engine, redis_
         assert set(by_text["11/09/2026–13/09/2026: b"].tags) == {"праздник", "школа"}
         assert all(n.enrich_status == "skipped" for n in notes)
         assert all(n.visibility == "private" for n in notes)  # private chat default
+
+
+async def test_confirm_events_table_skips_an_exact_duplicate_silently(db_engine, redis_client):
+    """03-ingest.md, "/events_table" - "уже существует": same date range,
+    type, and text as an already-saved event — a true duplicate, no
+    conflict to resolve."""
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    event = ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="a")
+
+    first_session = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=[event]
+    )
+    first = await confirm_events_table(deps, session_id=first_session, user_id=1)
+    assert first.created == 1
+
+    second_session = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=[event]
+    )
+    second = await confirm_events_table(deps, session_id=second_session, user_id=1)
+
+    assert second.created == 0
+    assert second.skipped_exact == 1
+    assert second.conflicts == []
+    async with deps.session_factory() as session:
+        notes = (
+            (
+                await session.execute(
+                    select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(notes) == 1  # the resend created nothing new
+
+
+async def test_confirm_events_table_flags_a_same_key_different_text_as_a_conflict(
+    db_engine, redis_client
+):
+    """Same date range + type, different text — the source table may have
+    genuinely changed ("הלוח עשוי להשתנות"), so this must be deferred to
+    resolve_events_table_conflict, not guessed at."""
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    first_session = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=[],
+        events=[
+            ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="a")
+        ],
+    )
+    await confirm_events_table(deps, session_id=first_session, user_id=1)
+
+    second_session = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=[],
+        events=[
+            ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="b")
+        ],
+    )
+    result = await confirm_events_table(deps, session_id=second_session, user_id=1)
+
+    assert result.created == 0
+    assert result.skipped_exact == 0
+    assert len(result.conflicts) == 1
+    assert result.conflicts[0].old_text == "01/09/2026: a"
+    assert result.conflicts[0].new_text == "01/09/2026: b"
+    assert result.conflicts_session_id is not None
+
+
+async def test_resolve_events_table_conflict_keep_old_is_a_no_op(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    first_session = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=[],
+        events=[
+            ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="a")
+        ],
+    )
+    await confirm_events_table(deps, session_id=first_session, user_id=1)
+    # Simulate the real pipeline having already finished processing this
+    # note (process_note would've moved it past 'pending' long before a
+    # second /events_table run could arrive) — so "untouched" below is
+    # actually observable, not just coincidentally still 'pending'.
+    async with deps.session_factory() as session:
+        note_id = (
+            await session.execute(
+                select(Note.id).where(Note.user_id == 1, Note.source_type == "table_event")
+            )
+        ).scalar_one()
+        note = await session.get(Note, note_id)
+        note.status = "done"
+        await session.commit()
+
+    second_session = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=[],
+        events=[
+            ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="b")
+        ],
+    )
+    result = await confirm_events_table(deps, session_id=second_session, user_id=1)
+
+    resolved = await resolve_events_table_conflict(
+        deps, session_id=result.conflicts_session_id, index=0, keep_new=False, user_id=1
+    )
+    assert resolved is True
+
+    async with deps.session_factory() as session:
+        note = (
+            await session.execute(
+                select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+            )
+        ).scalar_one()
+        assert note.raw_text == "01/09/2026: a"  # untouched
+        assert note.status == "done"  # never re-processed
+
+
+async def test_resolve_events_table_conflict_keep_new_replaces_the_note(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    first_session = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=["школа"],
+        events=[
+            ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="a")
+        ],
+    )
+    first = await confirm_events_table(deps, session_id=first_session, user_id=1)
+    assert first.created == 1
+
+    second_session = await deps.pending_events_cache.create(
+        chat_id=1,
+        user_id=1,
+        is_group=False,
+        tab_name="t",
+        topic_tags=["школа"],
+        events=[
+            ExtractedEvent(date_start="01/09/2026", date_end="01/09/2026", type="exam", text="b")
+        ],
+    )
+    result = await confirm_events_table(deps, session_id=second_session, user_id=1)
+    assert result.conflicts_session_id is not None
+
+    resolved = await resolve_events_table_conflict(
+        deps, session_id=result.conflicts_session_id, index=0, keep_new=True, user_id=1
+    )
+    assert resolved is True
+
+    async with deps.session_factory() as session:
+        note = (
+            await session.execute(
+                select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+            )
+        ).scalar_one()
+        assert note.raw_text == "01/09/2026: b"
+        assert note.status == "pending"  # needs re-embedding
+        assert len(deps.fast_queue.calls) >= 2  # first create + this replace
+
+
+async def test_resolve_events_table_conflict_rejects_the_wrong_user(db_engine, redis_client):
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    session_id = await deps.conflicts_cache.create(
+        user_id=1,
+        conflicts=[
+            PendingConflict(
+                note_id=1,
+                old_text="a",
+                new_text="b",
+                new_tags=[],
+                new_structured={},
+            )
+        ],
+    )
+    resolved = await resolve_events_table_conflict(
+        deps, session_id=session_id, index=0, keep_new=True, user_id=999
+    )
+    assert resolved is False
 
 
 async def test_confirm_events_table_group_notes_have_no_visibility(db_engine, redis_client):

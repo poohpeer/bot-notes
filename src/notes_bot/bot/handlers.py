@@ -11,9 +11,13 @@ the room (on_list_group — never a member's own private-chat notes, see
 NoteRepository.list_group). /trash stays private-only.
 
 /events_table (both chat types): an album of screenshots with caption
-"/events_table <tab name>" — buffered in-process (on_events_table_photo),
-parsed on the `llm` queue (queue/tasks.py's parse_events_table), previewed
-with a Сохранить/Отмена keyboard, confirmed here (on_events_table_confirm).
+"/events_table" (a tab name is optional) — buffered in-process
+(on_events_table_photo, also on_events_table_photo_edited for a caption
+added by editing rather than a fresh send), parsed on the `llm` queue
+(queue/tasks.py's parse_events_table), previewed with a Сохранить/Отмена
+keyboard, confirmed here (on_events_table_confirm) — a dedup conflict
+(same date range + type, different text) gets its own
+Оставить старое/Заменить новым message per conflict.
 
 Known gap: 03-ingest.md's flow diagram has the worker notify the bot when a
 note finishes processing, and — for voice specifically — "Бот отвечает на
@@ -40,6 +44,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 from notes_bot.bot.keyboards import (
     delete_confirm_keyboard,
+    events_table_conflict_keyboard,
     list_item_keyboard,
     list_more_keyboard,
     privacy_keyboard,
@@ -58,6 +63,7 @@ from notes_bot.bot.logic import (
     list_group_notes,
     list_notes,
     list_trash,
+    resolve_events_table_conflict,
     restore_note,
     run_search,
     save_note,
@@ -75,6 +81,8 @@ from notes_bot.bot.render import (
     render_delete_refused,
     render_edit_saved,
     render_events_table_cancelled,
+    render_events_table_conflict,
+    render_events_table_conflict_resolved,
     render_events_table_expired,
     render_events_table_saved,
     render_events_table_started,
@@ -581,10 +589,32 @@ async def on_events_table_usage(message: Message) -> None:
 
 @router.message(F.photo)
 async def on_events_table_photo(message: Message, deps: Deps) -> None:
+    await _buffer_events_table_photo(message, deps)
+
+
+@router.edited_message(F.photo)
+async def on_events_table_photo_edited(message: Message, deps: Deps) -> None:
+    """A photo sent without the "/events_table" caption, then edited to add
+    it (or to change the tab name), arrives as an `edited_message` update —
+    same gap on_group_message_edited fixes for group captures, found the
+    same way (a caption-adding edit that silently did nothing). Editing
+    doesn't change `message_id`, so a single photo's edit lands in the same
+    buffer entry a same-process, not-yet-flushed original would have used;
+    an album's edit still gets its own fresh flush either way."""
+    await _buffer_events_table_photo(message, deps)
+
+
+async def _buffer_events_table_photo(message: Message, deps: Deps) -> None:
     group_key = message.media_group_id or f"single:{message.chat.id}:{message.message_id}"
     pending = _album_buffers.setdefault(group_key, _PendingAlbum())
     # Telegram lists each photo at several resolutions; [-1] is the largest.
-    pending.file_ids.append(message.photo[-1].file_id)
+    # A dedup guard, not just an optimization: an edited_message for the
+    # same photo (on_events_table_photo_edited) re-delivers the same
+    # file_id, and would double it up in `pending` if the original send's
+    # flush timer hasn't fired yet.
+    file_id = message.photo[-1].file_id
+    if file_id not in pending.file_ids:
+        pending.file_ids.append(file_id)
     pending.any_message = message
     if message.caption:
         pending.caption_message = message
@@ -610,11 +640,13 @@ async def _flush_events_table_album(group_key: str, deps: Deps) -> None:
     match = _EVENTS_TABLE_CAPTION_RE.match(pending.caption_message.caption or "")
     if not match:
         return
+    # Optional — a screenshot is already one specific view, unlike a
+    # multi-tab file (xlsx, not supported yet) where naming a tab would
+    # actually disambiguate something. Empty is fine everywhere downstream
+    # (events_table.extract_events_table, the render_events_table_* calls
+    # below all handle it).
     tab_name = (match.group(1) or "").strip()
     reply_target = pending.caption_message
-    if not tab_name:
-        await reply_target.answer(render_events_table_usage())
-        return
 
     file_client = TelegramFileClient(deps.settings.telegram_bot_token)
     images: list[ImageInput] = []
@@ -651,7 +683,23 @@ async def on_events_table_confirm(callback: CallbackQuery, deps: Deps) -> None:
     if not result.ok:
         await callback.message.answer(render_events_table_expired())
         return
-    await callback.message.edit_text(render_events_table_saved(result.count))
+    await callback.message.edit_text(
+        render_events_table_saved(
+            created=result.created,
+            skipped_exact=result.skipped_exact,
+            conflicts=len(result.conflicts),
+        )
+    )
+    if result.conflicts_session_id is not None:
+        for conflict in result.conflicts:
+            await callback.message.answer(
+                render_events_table_conflict(
+                    old_text=conflict.old_text, new_text=conflict.new_text
+                ),
+                reply_markup=events_table_conflict_keyboard(
+                    result.conflicts_session_id, conflict.index
+                ),
+            )
 
 
 @router.callback_query(F.data.startswith("evtable_no:"))
@@ -665,3 +713,32 @@ async def on_events_table_cancel(callback: CallbackQuery, deps: Deps) -> None:
         await callback.message.answer(render_events_table_expired())
         return
     await callback.message.edit_text(render_events_table_cancelled())
+
+
+@router.callback_query(F.data.startswith("evconflict_old:"))
+async def on_events_table_conflict_keep_old(callback: CallbackQuery, deps: Deps) -> None:
+    await _resolve_events_table_conflict(callback, deps, keep_new=False)
+
+
+@router.callback_query(F.data.startswith("evconflict_new:"))
+async def on_events_table_conflict_keep_new(callback: CallbackQuery, deps: Deps) -> None:
+    await _resolve_events_table_conflict(callback, deps, keep_new=True)
+
+
+async def _resolve_events_table_conflict(
+    callback: CallbackQuery, deps: Deps, *, keep_new: bool
+) -> None:
+    # "evconflict_old:{session_id}:{index}" / "evconflict_new:{session_id}:{index}"
+    _, session_id, index_raw = callback.data.split(":", 2)
+    resolved = await resolve_events_table_conflict(
+        deps,
+        session_id=session_id,
+        index=int(index_raw),
+        keep_new=keep_new,
+        user_id=callback.from_user.id,
+    )
+    await callback.answer()
+    if not resolved:
+        await callback.message.answer(render_events_table_expired())
+        return
+    await callback.message.edit_text(render_events_table_conflict_resolved(kept_new=keep_new))

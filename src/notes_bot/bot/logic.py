@@ -6,12 +6,13 @@ thin aiogram-specific adapter on top of this.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from rq import Queue
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.bot.render import RenderableHit, render_search_debug_empty
+from notes_bot.clients.conflicts_cache import ConflictsCache, PendingConflict
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
@@ -53,6 +54,11 @@ class Deps:
     # parse_events_table) and the Сохранить/Отмена tap, which runs here in
     # the bot process. None only in tests that don't exercise this command.
     pending_events_cache: PendingEventsCache | None = None
+    # Same command's dedup step (03-ingest.md, "/events_table" - "уже
+    # существует") — holds the "same date range + type, different text"
+    # cases confirm_events_table couldn't resolve on its own, between the
+    # per-conflict message and the tap that answers it.
+    conflicts_cache: ConflictsCache | None = None
 
 
 @dataclass(frozen=True)
@@ -527,9 +533,19 @@ async def set_group_capture_mode(deps: Deps, *, chat_id: int, mode: str) -> None
 
 
 @dataclass(frozen=True)
+class ConflictPreview:
+    index: int
+    old_text: str
+    new_text: str
+
+
+@dataclass(frozen=True)
 class ConfirmEventsTableResult:
     ok: bool
-    count: int = 0
+    created: int = 0
+    skipped_exact: int = 0
+    conflicts_session_id: str | None = None
+    conflicts: list[ConflictPreview] = field(default_factory=list)
 
 
 async def confirm_events_table(
@@ -541,7 +557,15 @@ async def confirm_events_table(
     call. `ok=False` on an expired/foreign session — expired is normal
     (30-minute TTL, same as SearchSessionCache), foreign never happens
     through the bot's own UI but is still checked, same as show_detail's
-    own re-check."""
+    own re-check.
+
+    Dedup ("/events_table" - "уже существует"): each event is matched
+    against existing `table_event` notes in the same chat by (date_start,
+    date_end, type), never by text - the source table can legitimately
+    change between two screenshots of the same tab (it says so itself:
+    "הלוח עשוי להשתנות"). An exact text match is a true duplicate, skipped
+    silently; a same-key-different-text match is a real conflict, deferred
+    to `resolve_events_table_conflict` rather than guessed at here."""
     if deps.pending_events_cache is None:
         return ConfirmEventsTableResult(ok=False)
     pending = await deps.pending_events_cache.get(session_id)
@@ -556,7 +580,38 @@ async def confirm_events_table(
             visibility = settings_row.default_visibility
 
         created_ids: list[int] = []
+        skipped_exact = 0
+        conflicts: list[PendingConflict] = []
+
         for event in pending.extracted_events():
+            structured = {
+                "date_start": event.date_start,
+                "date_end": event.date_end,
+                "type": event.type,
+            }
+            tags = sorted({event.tag, *pending.topic_tags})
+
+            existing = await note_repo.find_table_event_by_key(
+                pending.chat_id,
+                date_start=event.date_start,
+                date_end=event.date_end,
+                type=event.type,
+            )
+            if existing is not None:
+                if existing.raw_text == event.note_text:
+                    skipped_exact += 1
+                else:
+                    conflicts.append(
+                        PendingConflict(
+                            note_id=existing.id,
+                            old_text=existing.raw_text or "",
+                            new_text=event.note_text,
+                            new_tags=tags,
+                            new_structured=structured,
+                        )
+                    )
+                continue
+
             note = await note_repo.create_note(
                 user_id=pending.user_id,
                 chat_id=pending.chat_id,
@@ -571,8 +626,7 @@ async def confirm_events_table(
             )
             if note is None:
                 continue
-            tags = sorted({event.tag, *pending.topic_tags})
-            await note_repo.set_tags_and_skip_enrich(note.id, tags)
+            await note_repo.set_tags_and_skip_enrich(note.id, tags, structured=structured)
             created_ids.append(note.id)
         await session.commit()
 
@@ -580,7 +634,55 @@ async def confirm_events_table(
         enqueue_process_note(deps.fast_queue, note_id)
 
     await deps.pending_events_cache.delete(session_id)
-    return ConfirmEventsTableResult(ok=True, count=len(created_ids))
+
+    conflicts_session_id = None
+    if conflicts and deps.conflicts_cache is not None:
+        conflicts_session_id = await deps.conflicts_cache.create(
+            user_id=pending.user_id, conflicts=conflicts
+        )
+
+    return ConfirmEventsTableResult(
+        ok=True,
+        created=len(created_ids),
+        skipped_exact=skipped_exact,
+        conflicts_session_id=conflicts_session_id,
+        conflicts=[
+            ConflictPreview(index=i, old_text=c.old_text, new_text=c.new_text)
+            for i, c in enumerate(conflicts)
+        ],
+    )
+
+
+async def resolve_events_table_conflict(
+    deps: Deps, *, session_id: str, index: int, keep_new: bool, user_id: int
+) -> bool:
+    """ "Оставить старое" / "Заменить новым" on one dedup conflict. Keeping
+    the old note is a pure no-op (it's already there, untouched); replacing
+    re-embeds it (`NoteRepository.replace_table_event` sets
+    `status='pending'`, same as any other text edit) since its raw_text is
+    now different."""
+    if deps.conflicts_cache is None:
+        return False
+    pending = await deps.conflicts_cache.get(session_id)
+    if pending is None or pending.user_id != user_id:
+        return False
+    items = pending.items()
+    if not (0 <= index < len(items)):
+        return False
+    if not keep_new:
+        return True
+
+    conflict = items[index]
+    async with deps.session_factory() as session:
+        await NoteRepository(session).replace_table_event(
+            conflict.note_id,
+            raw_text=conflict.new_text,
+            tags=conflict.new_tags,
+            structured=conflict.new_structured,
+        )
+        await session.commit()
+    enqueue_process_note(deps.fast_queue, conflict.note_id)
+    return True
 
 
 async def cancel_events_table(deps: Deps, *, session_id: str, user_id: int) -> bool:
