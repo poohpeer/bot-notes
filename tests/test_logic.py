@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.bot.logic import (
     Deps,
+    _filter_table_event_hits_by_subject,
     cancel_events_table,
     confirm_events_table,
     delete_note,
@@ -36,6 +37,7 @@ from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import ChatSettingsRepository, UserSettingsRepository
+from notes_bot.db.search import SearchHit
 from notes_bot.events_table import ExtractedEvent
 
 pytestmark = pytest.mark.asyncio
@@ -538,6 +540,72 @@ async def test_run_search_caches_a_session_and_returns_first_page(deps, db_engin
     assert page.session_id is not None
 
 
+def _table_event_hit(note_id: int, subjects: list[str]) -> SearchHit:
+    return SearchHit(
+        note_id=note_id,
+        title=None,
+        source_url=None,
+        source_type="table_event",
+        tags=[],
+        chunk_text="x",
+        distance=0.1,
+        structured={"subjects": subjects},
+        summary=None,
+    )
+
+
+def _text_hit(note_id: int) -> SearchHit:
+    return SearchHit(
+        note_id=note_id,
+        title=None,
+        source_url=None,
+        source_type="text",
+        tags=[],
+        chunk_text="x",
+        distance=0.1,
+        structured={},
+        summary=None,
+    )
+
+
+async def test_filter_table_event_hits_by_subject_keeps_only_the_matching_subject():
+    """The 30/11 bug from prod: a query naming a subject some table_event
+    hits don't have must drop those, not just accept the generic "экзамен"
+    vector match for all of them."""
+    hits = [
+        _table_event_hit(1, ["математика"]),
+        _table_event_hit(2, ["физика", "искусство"]),
+    ]
+    result = _filter_table_event_hits_by_subject(hits, "когда экзамен по математике?")
+    assert [h.note_id for h in result] == [1]
+
+
+async def test_filter_table_event_hits_by_subject_keeps_everything_when_no_subject_matches():
+    """Nothing to discriminate on - a broad answer beats an empty one."""
+    hits = [
+        _table_event_hit(1, ["физика"]),
+        _table_event_hit(2, ["биология"]),
+    ]
+    result = _filter_table_event_hits_by_subject(hits, "когда экзамен по химии?")
+    assert [h.note_id for h in result] == [1, 2]
+
+
+async def test_filter_table_event_hits_by_subject_leaves_non_table_event_hits_alone():
+    hits = [
+        _table_event_hit(1, ["математика"]),
+        _table_event_hit(2, ["физика"]),
+        _text_hit(3),
+    ]
+    result = _filter_table_event_hits_by_subject(hits, "математика")
+    assert [h.note_id for h in result] == [1, 3]
+
+
+async def test_filter_table_event_hits_by_subject_is_a_no_op_with_fewer_than_two_table_event_hits():
+    hits = [_table_event_hit(1, ["физика"]), _text_hit(2)]
+    result = _filter_table_event_hits_by_subject(hits, "математика")
+    assert [h.note_id for h in result] == [1, 2]
+
+
 async def test_run_search_with_no_matching_notes_returns_empty(deps):
     page = await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
     assert page.hits == []
@@ -794,6 +862,39 @@ async def test_confirm_events_table_creates_one_note_per_event(db_engine, redis_
         assert set(by_text["11/09/2026–13/09/2026: b"].tags) == {"праздник", "школа"}
         assert all(n.enrich_status == "skipped" for n in notes)
         assert all(n.visibility == "private" for n in notes)  # private chat default
+
+
+async def test_confirm_events_table_puts_subjects_in_tags_and_structured(db_engine, redis_client):
+    """04-search.md's subject-based filter reads structured["subjects"] -
+    it has to actually be there for a note created by a real confirm."""
+    deps = _deps_with_events_cache(db_engine, redis_client)
+    events = [
+        ExtractedEvent(
+            date_start="30/11/2026",
+            date_end="30/11/2026",
+            type="exam",
+            text="a",
+            subjects=["физика", "искусство"],
+        ),
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=events
+    )
+
+    await confirm_events_table(deps, session_id=session_id, user_id=1)
+
+    async with deps.session_factory() as session:
+        note = (
+            (
+                await session.execute(
+                    select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert set(note.tags) == {"экзамен", "физика", "искусство"}
+        assert note.structured["subjects"] == ["физика", "искусство"]
 
 
 async def test_confirm_events_table_skips_an_exact_duplicate_silently(db_engine, redis_client):

@@ -12,7 +12,7 @@ already exists.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from notes_bot.clients.llm import ImageInput, LLMClient
 from notes_bot.clients.prompts import load_prompt
@@ -32,6 +32,7 @@ _EVENTS_TABLE_SCHEMA = {
                     "date_end": {"type": ["string", "null"]},
                     "type": {"type": "string", "enum": sorted(_EVENT_TYPES)},
                     "text": {"type": ["string", "null"]},
+                    "subjects": {"type": "array", "items": {"type": "string"}},
                 },
             },
         },
@@ -48,6 +49,7 @@ class ExtractedEvent:
     date_end: str
     type: str
     text: str
+    subjects: list[str] = field(default_factory=list)
 
     @property
     def tag(self) -> str:
@@ -110,6 +112,12 @@ async def extract_events_table(
                 continue
             date_end = item.get("date_end")
             event_type = item.get("type")
+            raw_subjects = item.get("subjects")
+            subjects = (
+                [s.strip().lower() for s in raw_subjects if isinstance(s, str) and s.strip()]
+                if isinstance(raw_subjects, list)
+                else []
+            )
             events.append(
                 ExtractedEvent(
                     date_start=date_start.strip(),
@@ -120,6 +128,7 @@ async def extract_events_table(
                     ),
                     type=event_type if event_type in _EVENT_TYPES else "event",
                     text=text.strip(),
+                    subjects=subjects,
                 )
             )
 

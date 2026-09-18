@@ -73,6 +73,26 @@ async def test_extract_events_table_parses_events_and_topic_tags():
     ]
 
 
+async def test_extract_events_table_parses_and_lowercases_subjects():
+    llm = ScriptedLLMClient(
+        {
+            "topic_tags": [],
+            "events": [
+                {
+                    "date_start": "30/11/2026",
+                    "type": "exam",
+                    "text": "מבחן אשכול ב",
+                    "subjects": ["Физика", "Искусство", "  ", 5],
+                },
+                {"date_start": "01/09/2026", "type": "holiday", "text": "חג"},
+            ],
+        }
+    )
+    table = await extract_events_table(llm, images=[_image()], tab_name="t", timeout_s=10)
+    assert table.events[0].subjects == ["физика", "искусство"]
+    assert table.events[1].subjects == []
+
+
 async def test_extract_events_table_drops_events_missing_text_or_date():
     llm = ScriptedLLMClient(
         {

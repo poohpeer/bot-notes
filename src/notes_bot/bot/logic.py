@@ -182,6 +182,45 @@ class SearchPageResult:
     debug_info: str | None = None
 
 
+_SUBJECT_STEM_LEN = 5
+
+
+def _filter_table_event_hits_by_subject(hits: list, query_text: str) -> list:
+    """/events_table (03-ingest.md) notes are short, templated exam-cluster
+    listings ("экзамен - физика/искусство/кино/..."), so a plain vector
+    search for "экзамен по математике" pulls in every exam note in the
+    corpus about equally well - "экзамен" dominates the embedding, the
+    specific subject barely moves it. When the query names a subject that
+    some retrieved table_event hit's `structured["subjects"]` (set at
+    parse time) actually has but others don't, keep only the ones that
+    do; every other hit, and every other source_type, is untouched.
+
+    A crude prefix-stem match (first `_SUBJECT_STEM_LEN` chars), not real
+    morphology - good enough to tell "математика"/"математике" apart from
+    "физика" without a real stemmer. Never removes every table_event hit:
+    if none of them name a subject the query mentions, there's nothing to
+    discriminate on, so all are kept (better a broad answer than none)."""
+    query_lower = query_text.lower()
+    table_event_hits = [h for h in hits if h.source_type == "table_event"]
+    if len(table_event_hits) < 2:
+        return hits
+
+    def subjects_of(hit) -> list[str]:
+        return (hit.structured or {}).get("subjects") or []
+
+    def matches(hit) -> bool:
+        return any(
+            len(subject) >= 3 and subject[:_SUBJECT_STEM_LEN] in query_lower
+            for subject in subjects_of(hit)
+        )
+
+    matching_ids = {h.note_id for h in table_event_hits if matches(h)}
+    if not matching_ids or len(matching_ids) == len(table_event_hits):
+        return hits
+
+    return [h for h in hits if h.source_type != "table_event" or h.note_id in matching_ids]
+
+
 async def run_search(
     deps: Deps, *, user_id: int, chat_id: int, is_group_chat: bool, query_text: str
 ) -> SearchPageResult:
@@ -232,6 +271,7 @@ async def run_search(
             if max_distance is None
             else [h for h in raw_hits if h.distance <= max_distance]
         )
+        hits = _filter_table_event_hits_by_subject(hits, query_text)
 
         if not hits:
             debug_info = None
@@ -608,8 +648,14 @@ async def confirm_events_table(
                 "date_start": event.date_start,
                 "date_end": event.date_end,
                 "type": event.type,
+                # Only consumed by _filter_table_event_hits_by_subject
+                # (04-search.md) - a generic vector search for "экзамен по
+                # X" matches every exam note equally (they're all short,
+                # templated "экзамен - список предметов" text), so search
+                # needs the actual subject list to tell them apart.
+                "subjects": event.subjects,
             }
-            tags = sorted({event.tag, *pending.topic_tags})
+            tags = sorted({event.tag, *pending.topic_tags, *event.subjects})
 
             existing = existing_by_key.get((event.date_start, event.date_end, event.type))
             if existing is not None:
