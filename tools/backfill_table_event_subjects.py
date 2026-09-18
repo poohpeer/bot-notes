@@ -13,6 +13,14 @@ re-embed happens.
 Usage:
     uv run python tools/backfill_table_event_subjects.py
     uv run python tools/backfill_table_event_subjects.py --dry-run
+    uv run python tools/backfill_table_event_subjects.py --force
+
+`--force` re-processes notes that already have `structured["subjects"]`
+too — needed once, after the subjects language convention changed
+(03-ingest.md: `tags` stays in the table's own language, `structured`
+becomes the translated, canonical-language copy) - a first run under the
+old convention left `structured["subjects"]` in the wrong language for
+today's filter to match against.
 """
 
 from __future__ import annotations
@@ -59,7 +67,7 @@ def _get_translate_client(settings: Settings) -> HttpTranslateClient | None:
 
 
 async def backfill(
-    *, session_factory, llm, translate_client, dry_run: bool, timeout_s: float
+    *, session_factory, llm, translate_client, dry_run: bool, timeout_s: float, force: bool = False
 ) -> int:
     updated = 0
     async with session_factory() as session:
@@ -73,7 +81,7 @@ async def backfill(
         repo = NoteRepository(session)
 
         for note in notes:
-            if note.structured and "subjects" in note.structured:
+            if not force and note.structured and "subjects" in note.structured:
                 continue
             subjects = await extract_subjects_from_text(llm, note.raw_text, timeout_s=timeout_s)
 
@@ -134,6 +142,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         translate_client=translate_client,
         dry_run=args.dry_run,
         timeout_s=args.timeout_s,
+        force=args.force,
     )
     await engine.dispose()
     return updated
@@ -143,6 +152,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dry-run", action="store_true", help="log what would change, write nothing"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-process notes that already have structured['subjects'] too",
     )
     parser.add_argument("--timeout-s", type=float, default=60.0)
     args = parser.parse_args()

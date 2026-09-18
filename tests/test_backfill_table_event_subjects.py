@@ -114,6 +114,33 @@ async def test_backfill_skips_notes_that_already_have_subjects(factory):
     assert updated == 0
 
 
+async def test_backfill_force_reprocesses_notes_that_already_have_subjects(factory):
+    """--force: needed once after the subjects language convention
+    changed (03-ingest.md) - a first run under the old convention left
+    structured["subjects"] in the wrong language for today's filter."""
+    note_id = await _make_table_event_note(factory, raw_text="01/09/2026: מבחן מתמטיקה")
+    async with factory() as session:
+        await NoteRepository(session).merge_table_event_subjects(
+            note_id, subjects=["математика"], canonical_subjects=["математика"]
+        )
+        await session.commit()
+
+    llm = ScriptedLLMClient({"01/09/2026: מבחן מתמטיקה": ["מתמטיקה"]})
+    updated = await backfill(
+        session_factory=factory,
+        llm=llm,
+        translate_client=FakeTranslateClient(),
+        dry_run=False,
+        timeout_s=10,
+        force=True,
+    )
+
+    assert updated == 1
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.structured["subjects"] == ["[en] מתמטיקה"]
+
+
 async def test_backfill_dry_run_writes_nothing(factory):
     note_id = await _make_table_event_note(factory, raw_text="01/09/2026: מבחן מתמטיקה")
     llm = ScriptedLLMClient({"01/09/2026: מבחן מתמטיקה": ["מתמטיקה"]})
