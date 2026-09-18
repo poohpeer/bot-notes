@@ -6,6 +6,7 @@ thin aiogram-specific adapter on top of this.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from rq import Queue
@@ -182,37 +183,52 @@ class SearchPageResult:
     debug_info: str | None = None
 
 
-_SUBJECT_STEM_LEN = 5
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+_MIN_STEM_LEN = 3
+_MAX_STEM_LEN = 6
 
 
-def _filter_table_event_hits_by_subject(hits: list, query_text: str) -> list:
+def _stems_match(subject: str, token: str) -> bool:
+    """A shared-prefix check, not real morphology - good enough to tell
+    "математика"/"mathematics" apart from "физика"/"physics" without a
+    real stemmer, and forgiving of translate_client's own inconsistent
+    endings ("math" vs "mathematics" for the same subject) by capping at
+    `_MAX_STEM_LEN` rather than requiring one string to literally contain
+    the other."""
+    k = min(len(subject), len(token), _MAX_STEM_LEN)
+    return k >= _MIN_STEM_LEN and subject[:k] == token[:k]
+
+
+def _filter_table_event_hits_by_subject(hits: list, canonical_query: str) -> list:
     """/events_table (03-ingest.md) notes are short, templated exam-cluster
     listings ("экзамен - физика/искусство/кино/..."), so a plain vector
     search for "экзамен по математике" pulls in every exam note in the
     corpus about equally well - "экзамен" dominates the embedding, the
     specific subject barely moves it. When the query names a subject that
     some retrieved table_event hit's `structured["subjects"]` (set at
-    parse time) actually has but others don't, keep only the ones that
-    do; every other hit, and every other source_type, is untouched.
+    parse time, in the same canonical language as `canonical_query` - see
+    confirm_events_table/run_search) actually has but others don't, keep
+    only the ones that do; every other hit, and every other source_type,
+    is untouched.
 
-    A crude prefix-stem match (first `_SUBJECT_STEM_LEN` chars), not real
-    morphology - good enough to tell "математика"/"математике" apart from
-    "физика" without a real stemmer. Never removes every table_event hit:
-    if none of them name a subject the query mentions, there's nothing to
-    discriminate on, so all are kept (better a broad answer than none)."""
-    query_lower = query_text.lower()
+    `canonical_query` must already be in that same canonical language
+    (run_search passes `embed_text`, not the caller's raw `query_text`) -
+    language-agnostic the same way the vector search itself is, not
+    "matches only if you happen to type the note's own language". Never
+    removes every table_event hit: if none of them name a subject the
+    query mentions, there's nothing to discriminate on, so all are kept
+    (better a broad answer than none)."""
+    query_tokens = _WORD_RE.findall(canonical_query.lower())
     table_event_hits = [h for h in hits if h.source_type == "table_event"]
-    if len(table_event_hits) < 2:
+    if len(table_event_hits) < 2 or not query_tokens:
         return hits
 
     def subjects_of(hit) -> list[str]:
         return (hit.structured or {}).get("subjects") or []
 
     def matches(hit) -> bool:
-        return any(
-            len(subject) >= 3 and subject[:_SUBJECT_STEM_LEN] in query_lower
-            for subject in subjects_of(hit)
-        )
+        subjects = [s.lower() for s in subjects_of(hit) if s]
+        return any(_stems_match(subject, token) for subject in subjects for token in query_tokens)
 
     matching_ids = {h.note_id for h in table_event_hits if matches(h)}
     if not matching_ids or len(matching_ids) == len(table_event_hits):
@@ -271,7 +287,12 @@ async def run_search(
             if max_distance is None
             else [h for h in raw_hits if h.distance <= max_distance]
         )
-        hits = _filter_table_event_hits_by_subject(hits, query_text)
+        # embed_text, not query_text: structured["subjects"] is stored in
+        # the same canonical translate_target_lang as embed_text (see
+        # confirm_events_table), not in whichever language the caller
+        # happened to type - language-agnostic the same way the vector
+        # search itself already is, not just "matches if you type Russian".
+        hits = _filter_table_event_hits_by_subject(hits, embed_text)
 
         if not hits:
             debug_info = None
@@ -639,6 +660,25 @@ async def confirm_events_table(
             if prior is None or existing_note.id > prior.id:
                 existing_by_key[key] = existing_note
 
+        # `event.subjects` stays in the table's own language (goes into
+        # `tags`, shown to the user) - `structured["subjects"]` needs a
+        # canonical-language copy instead, so `_filter_table_event_hits_by_subject`
+        # can compare it against `embed_text` regardless of which language
+        # either the table or the search query happened to use. One batch
+        # translate call for the whole run, not one per event.
+        all_subjects = sorted({s for event in pending.extracted_events() for s in event.subjects})
+        canonical_by_subject: dict[str, str] = {}
+        if all_subjects and deps.translate_client is not None:
+            try:
+                translated = await deps.translate_client.translate_passages(all_subjects)
+                canonical_by_subject = dict(zip(all_subjects, translated, strict=True))
+            except TranslateServiceError as exc:
+                log.warning(
+                    "confirm_events_table: translate failed, subject filter stays "
+                    "same-language-only for this batch: %s",
+                    exc,
+                )
+
         created_ids: list[int] = []
         skipped_exact = 0
         conflicts: list[PendingConflict] = []
@@ -652,8 +692,10 @@ async def confirm_events_table(
                 # (04-search.md) - a generic vector search for "экзамен по
                 # X" matches every exam note equally (they're all short,
                 # templated "экзамен - список предметов" text), so search
-                # needs the actual subject list to tell them apart.
-                "subjects": event.subjects,
+                # needs the actual subject list to tell them apart. In the
+                # canonical translate language, not event.subjects' own
+                # (table's) language - see canonical_by_subject above.
+                "subjects": [canonical_by_subject.get(s, s) for s in event.subjects],
             }
             tags = sorted({event.tag, *pending.topic_tags, *event.subjects})
 

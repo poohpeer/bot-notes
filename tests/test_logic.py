@@ -77,7 +77,9 @@ class FakeTranslateClient:
         self.query_calls: list[str] = []
 
     async def translate_passages(self, texts):
-        raise NotImplementedError
+        if self._fail_with:
+            raise self._fail_with
+        return [f"[en] {t}" for t in texts]
 
     async def translate_query(self, text: str) -> str:
         self.query_calls.append(text)
@@ -606,6 +608,19 @@ async def test_filter_table_event_hits_by_subject_is_a_no_op_with_fewer_than_two
     assert [h.note_id for h in result] == [1, 2]
 
 
+async def test_filter_table_event_hits_by_subject_tolerates_different_word_endings():
+    """Both sides are already in the same canonical translate language
+    (04-search.md) - but the translate service's own wording can still
+    differ between a full word and its translated query form ("mathematics"
+    vs "math"), so the match is a shared-prefix check, not an exact one."""
+    hits = [
+        _table_event_hit(1, ["mathematics"]),
+        _table_event_hit(2, ["literature"]),
+    ]
+    result = _filter_table_event_hits_by_subject(hits, "when is the math exam?")
+    assert [h.note_id for h in result] == [1]
+
+
 async def test_run_search_with_no_matching_notes_returns_empty(deps):
     page = await run_search(deps, user_id=1, chat_id=1, is_group_chat=False, query_text="q")
     assert page.hits == []
@@ -812,7 +827,7 @@ async def test_show_detail_rechecks_acl_and_hides_a_note_made_private_since(deps
     assert hit is None
 
 
-def _deps_with_events_cache(db_engine, redis_client) -> Deps:
+def _deps_with_events_cache(db_engine, redis_client, *, translate_client=None) -> Deps:
     session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     return Deps(
         session_factory=session_factory,
@@ -822,6 +837,7 @@ def _deps_with_events_cache(db_engine, redis_client) -> Deps:
         heavy_queue=FakeQueue(),
         llm_queue=FakeQueue(),
         settings=_settings(),
+        translate_client=translate_client,
         pending_events_cache=PendingEventsCache(redis_client),
         conflicts_cache=ConflictsCache(redis_client),
     )
@@ -895,6 +911,44 @@ async def test_confirm_events_table_puts_subjects_in_tags_and_structured(db_engi
         )
         assert set(note.tags) == {"экзамен", "физика", "искусство"}
         assert note.structured["subjects"] == ["физика", "искусство"]
+
+
+async def test_confirm_events_table_keeps_display_tags_but_canonicalizes_structured_subjects(
+    db_engine, redis_client
+):
+    """/events_table's own subjects stay in the table's language for the
+    hashtags shown to the user - structured["subjects"] gets the
+    translate_client's canonical-language copy instead, so
+    _filter_table_event_hits_by_subject can match a query typed in a
+    different language (04-search.md)."""
+    deps = _deps_with_events_cache(db_engine, redis_client, translate_client=FakeTranslateClient())
+    events = [
+        ExtractedEvent(
+            date_start="30/11/2026",
+            date_end="30/11/2026",
+            type="exam",
+            text="a",
+            subjects=["מתמטיקה"],
+        ),
+    ]
+    session_id = await deps.pending_events_cache.create(
+        chat_id=1, user_id=1, is_group=False, tab_name="t", topic_tags=[], events=events
+    )
+
+    await confirm_events_table(deps, session_id=session_id, user_id=1)
+
+    async with deps.session_factory() as session:
+        note = (
+            (
+                await session.execute(
+                    select(Note).where(Note.user_id == 1, Note.source_type == "table_event")
+                )
+            )
+            .scalars()
+            .one()
+        )
+        assert "מתמטיקה" in note.tags  # display tag: original (table's) language
+        assert note.structured["subjects"] == ["[en] מתמטיקה"]  # canonical, for matching
 
 
 async def test_confirm_events_table_skips_an_exact_duplicate_silently(db_engine, redis_client):

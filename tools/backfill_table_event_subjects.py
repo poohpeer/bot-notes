@@ -24,6 +24,7 @@ import logging
 from sqlalchemy import select
 
 from notes_bot.clients.llm import LLMClient, NullLLMClient, ProxyAILLMClient
+from notes_bot.clients.translate import HttpTranslateClient, TranslateServiceError
 from notes_bot.config import Settings, get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
 from notes_bot.db.models import Note
@@ -44,7 +45,22 @@ def _get_llm_client(settings: Settings) -> LLMClient:
     return ProxyAILLMClient(settings.proxy_ai_url)
 
 
-async def backfill(*, session_factory, llm, dry_run: bool, timeout_s: float) -> int:
+def _get_translate_client(settings: Settings) -> HttpTranslateClient | None:
+    """Same choice as queue/tasks.py's own `_get_translate_client` (see
+    `_get_llm_client`'s own docstring for why this is duplicated, not
+    imported)."""
+    if not settings.translate_enabled:
+        return None
+    return HttpTranslateClient(
+        settings.translate_url,
+        target_lang=settings.translate_target_lang,
+        timeout=settings.translate_timeout_s,
+    )
+
+
+async def backfill(
+    *, session_factory, llm, translate_client, dry_run: bool, timeout_s: float
+) -> int:
     updated = 0
     async with session_factory() as session:
         result = await session.execute(
@@ -60,10 +76,37 @@ async def backfill(*, session_factory, llm, dry_run: bool, timeout_s: float) -> 
             if note.structured and "subjects" in note.structured:
                 continue
             subjects = await extract_subjects_from_text(llm, note.raw_text, timeout_s=timeout_s)
-            log.info("note_id=%s raw_text=%r -> subjects=%r", note.id, note.raw_text, subjects)
+
+            # subjects stays in the table's own language (-> tags, shown to
+            # the user); canonical_subjects is the same canonical
+            # translate-language copy confirm_events_table stores in
+            # structured["subjects"], so the search-time subject filter
+            # (bot/logic.py) works the same for backfilled and freshly
+            # created notes alike - see 03-ingest.md, "Бэкфилл subjects".
+            canonical_subjects = subjects
+            if subjects and translate_client is not None:
+                try:
+                    canonical_subjects = await translate_client.translate_passages(subjects)
+                except TranslateServiceError as exc:
+                    log.warning(
+                        "note_id=%s translate failed, subject filter stays "
+                        "same-language-only for this note: %s",
+                        note.id,
+                        exc,
+                    )
+
+            log.info(
+                "note_id=%s raw_text=%r -> subjects=%r canonical_subjects=%r",
+                note.id,
+                note.raw_text,
+                subjects,
+                canonical_subjects,
+            )
             if dry_run:
                 continue
-            await repo.merge_table_event_subjects(note.id, subjects=subjects)
+            await repo.merge_table_event_subjects(
+                note.id, subjects=subjects, canonical_subjects=canonical_subjects
+            )
             updated += 1
 
         if not dry_run:
@@ -78,6 +121,9 @@ async def _main_async(args: argparse.Namespace) -> int:
     llm = _get_llm_client(settings)
     if isinstance(llm, NullLLMClient):
         log.warning("LLM_ENABLED=false — every note will backfill to an empty subjects list")
+    translate_client = _get_translate_client(settings)
+    if translate_client is None:
+        log.warning("TRANSLATE_ENABLED=false — subjects will only match same-language queries")
 
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
@@ -85,6 +131,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     updated = await backfill(
         session_factory=session_factory,
         llm=llm,
+        translate_client=translate_client,
         dry_run=args.dry_run,
         timeout_s=args.timeout_s,
     )

@@ -306,17 +306,30 @@ class NoteRepository:
             .values(raw_text=raw_text, tags=tags, structured=structured, status="pending")
         )
 
-    async def merge_table_event_subjects(self, note_id: int, *, subjects: list[str]) -> None:
+    async def merge_table_event_subjects(
+        self, note_id: int, *, subjects: list[str], canonical_subjects: list[str] | None = None
+    ) -> None:
         """One-off backfill (03-ingest.md, "Бэкфилл subjects") for
         table_event notes created before /events_table started extracting
         `subjects` - merges into the existing tags/structured rather than
         replacing them, and never touches `status`: tags/structured don't
-        feed the vector, so no re-embed is needed."""
+        feed the vector, so no re-embed is needed.
+
+        `subjects` (the table's own language) goes into `tags`, shown to
+        the user; `structured["subjects"]` gets `canonical_subjects`
+        instead (the same canonical translate language `run_search`'s
+        `embed_text` uses) so `_filter_table_event_hits_by_subject` stays
+        language-agnostic - falls back to `subjects` when translation
+        wasn't available (matches only same-language queries, same
+        best-effort degradation as everywhere else translate is used)."""
         note = await self.get(note_id)
         if note is None:
             return
         tags = sorted({*note.tags, *subjects})
-        structured = {**(note.structured or {}), "subjects": subjects}
+        structured = {
+            **(note.structured or {}),
+            "subjects": canonical_subjects if canonical_subjects is not None else subjects,
+        }
         await self._session.execute(
             update(Note).where(Note.id == note_id).values(tags=tags, structured=structured)
         )
