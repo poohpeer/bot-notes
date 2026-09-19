@@ -99,6 +99,36 @@ async def test_generate_places_strips_empty_location_hint():
     assert places == [{"name": "Ботанический сад"}]
 
 
+async def test_generate_places_keeps_address_separate_from_location_hint():
+    """render.render_places builds its Maps query from `address` alone
+    when present - the two must never collapse into one field again."""
+    llm = ScriptedLLMClient(
+        {
+            "places": [
+                {
+                    "name": "Лавка у Лены",
+                    "address": "39 Mikheili Tsinamdzghvrishvili St, Tbilisi 0102",
+                    "location_hint": "напротив Wine Gallery",
+                }
+            ]
+        }
+    )
+    places = await generate_places(llm, "text", timeout_s=10)
+    assert places == [
+        {
+            "name": "Лавка у Лены",
+            "address": "39 Mikheili Tsinamdzghvrishvili St, Tbilisi 0102",
+            "location_hint": "напротив Wine Gallery",
+        }
+    ]
+
+
+async def test_generate_places_strips_empty_address():
+    llm = ScriptedLLMClient({"places": [{"name": "Fabrika", "address": "  "}]})
+    places = await generate_places(llm, "text", timeout_s=10)
+    assert places == [{"name": "Fabrika"}]
+
+
 async def test_generate_places_returns_every_place_no_cap():
     llm = ScriptedLLMClient({"places": [{"name": f"place{i}"} for i in range(10)]})
     places = await generate_places(llm, "text", timeout_s=10)

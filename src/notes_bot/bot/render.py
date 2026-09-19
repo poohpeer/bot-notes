@@ -174,8 +174,20 @@ def render_places(structured: dict) -> list[str]:
         name = place.get("name")
         if not isinstance(name, str) or not name.strip():
             continue
+        # A formal address alone resolves far more reliably in Maps' fuzzy
+        # text search than "name + address" or "name + a relative
+        # description" - mixing in a venue name Maps has no listing for
+        # (a small unlisted shop) or noise like "напротив X" measurably
+        # threw the match off (03-ingest.md, "Места из видео"). Falls back
+        # to name+hint only when generate_places found no clean address.
+        address = place.get("address")
         hint = place.get("location_hint")
-        query = f"{name} {hint}" if isinstance(hint, str) and hint.strip() else name
+        if isinstance(address, str) and address.strip():
+            query = address
+        elif isinstance(hint, str) and hint.strip():
+            query = f"{name} {hint}"
+        else:
+            query = name
         url = _google_maps_search_url(query)
         lines.append(f'📍 <a href="{_esc(url)}">{_esc(name)}</a>')
     return lines

@@ -310,6 +310,27 @@ def test_render_places_works_without_location_hint():
     assert lines[0].endswith(">Ботанический сад</a>")
 
 
+def test_render_places_uses_address_alone_when_present():
+    """Mixing the place's own name or a relative description ("напротив
+    X") into the Maps query measurably threw off its fuzzy text search for
+    a venue with no listing of its own (03-ingest.md, "Места из видео") -
+    a clean address, when generate_places found one, must be the query on
+    its own, not name+address or hint+address."""
+    lines = render_places(
+        {
+            "places": [
+                {
+                    "name": "Лавка у Лены",
+                    "address": "39 Mikheili Tsinamdzghvrishvili St, Tbilisi 0102",
+                    "location_hint": "напротив Wine Gallery",
+                }
+            ]
+        }
+    )
+    query_param = lines[0].split("query=")[1].split('"')[0]
+    assert unquote(query_param) == "39 Mikheili Tsinamdzghvrishvili St, Tbilisi 0102"
+
+
 def test_render_places_on_malformed_structured_is_empty():
     assert render_places({}) == []
     assert render_places({"places": "not a list"}) == []

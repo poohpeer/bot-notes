@@ -55,6 +55,7 @@ _PLACES_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "name": {"type": ["string", "null"]},
+                    "address": {"type": ["string", "null"]},
                     "location_hint": {"type": ["string", "null"]},
                 },
             },
@@ -127,9 +128,19 @@ async def generate_place(llm: LLMClient, text: str, *, timeout_s: float) -> dict
 
 async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> list[dict]:
     """For `youtube`/`instagram` notes: places mentioned in a video's
-    caption/transcript, each `{"name": ..., "location_hint": ...}` — see
-    04-search.md/03-ingest.md, "Места из видео". Unlike `generate_place`,
-    a video can plausibly mention several places, not describe exactly one."""
+    caption/transcript, each `{"name": ..., "address": ..., "location_hint":
+    ...}` — see 04-search.md/03-ingest.md, "Места из видео". Unlike
+    `generate_place`, a video can plausibly mention several places, not
+    describe exactly one.
+
+    `address` (a genuine, formal street address - street + house number,
+    ideally + city) is kept separate from `location_hint` (everything else:
+    district, "next to X", spoken-only landmarks) precisely because
+    `render.render_places` builds its Google Maps search query from
+    `address` alone when present - mixing in the place's own `name` or a
+    relative description ("напротив X") measurably threw off Maps' fuzzy
+    text search for a small venue with no listing of its own (03-ingest.md,
+    "Места из видео")."""
     result = await llm.complete(
         system=load_prompt("places"),
         user=text[:_HEAD_CHARS],
@@ -149,6 +160,9 @@ async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> lis
         if not isinstance(name, str) or not name.strip():
             continue
         cleaned_place = {"name": name.strip()}
+        address = place.get("address")
+        if isinstance(address, str) and address.strip():
+            cleaned_place["address"] = address.strip()
         hint = place.get("location_hint")
         if isinstance(hint, str) and hint.strip():
             cleaned_place["location_hint"] = hint.strip()
