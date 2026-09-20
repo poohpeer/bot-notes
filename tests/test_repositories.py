@@ -639,6 +639,44 @@ async def test_soft_delete_twice_returns_false_the_second_time(db_session):
     assert await repo.soft_delete(note.id, 1) is False
 
 
+async def test_soft_delete_by_chat_deletes_every_note_regardless_of_owner(db_session):
+    """tools/purge_chat_notes.py's own write path - a group chat's notes
+    are commonly saved by several different people, so this deliberately
+    isn't scoped to one user_id, unlike soft_delete."""
+    repo = NoteRepository(db_session)
+    a = await repo.create_text_note(
+        user_id=1, chat_id=99, is_group=True, tg_message_id=510, raw_text="a", visibility=None
+    )
+    b = await repo.create_text_note(
+        user_id=2, chat_id=99, is_group=True, tg_message_id=511, raw_text="b", visibility=None
+    )
+    other_chat = await repo.create_text_note(
+        user_id=1, chat_id=100, is_group=True, tg_message_id=512, raw_text="c", visibility=None
+    )
+
+    count = await repo.soft_delete_by_chat(99)
+
+    assert count == 2
+    # The bulk UPDATE expires a's/b's identity-mapped state (they matched
+    # its WHERE clause) - same as test_restore_brings_a_note_back's own
+    # comment on why a plain attribute read needs an explicit refresh
+    # first here, not a lazy-load outside an awaited context.
+    await db_session.refresh(a)
+    await db_session.refresh(b)
+    assert a.deleted_at is not None
+    assert b.deleted_at is not None
+    assert (await repo.get(other_chat.id)).deleted_at is None
+
+
+async def test_soft_delete_by_chat_skips_already_deleted_notes(db_session):
+    repo = NoteRepository(db_session)
+    await repo.create_text_note(
+        user_id=1, chat_id=99, is_group=True, tg_message_id=513, raw_text="a", visibility=None
+    )
+    await repo.soft_delete_by_chat(99)
+    assert await repo.soft_delete_by_chat(99) == 0
+
+
 async def test_restore_brings_a_note_back(db_session):
     repo = NoteRepository(db_session)
     note = await repo.create_text_note(

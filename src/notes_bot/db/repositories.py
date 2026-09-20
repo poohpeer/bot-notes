@@ -422,6 +422,22 @@ class NoteRepository:
         )
         return result.rowcount > 0
 
+    async def soft_delete_by_chat(self, chat_id: int) -> int:
+        """Bulk delete for `tools/purge_chat_notes.py` (03-ingest.md,
+        "Массовое удаление") - unlike `soft_delete`, deliberately not
+        scoped to a single `user_id`: wiping a whole group chat's notes is
+        an operator action, not something a single member's own notes
+        would cover if several people saved into the same chat. Same
+        reversibility as any other soft delete - `/trash`/`restore_note`
+        and GC_RETENTION_DAYS both apply unchanged, nothing here bypasses
+        them."""
+        result = await self._session.execute(
+            update(Note)
+            .where(Note.chat_id == chat_id, Note.deleted_at.is_(None))
+            .values(deleted_at=func.now())
+        )
+        return result.rowcount
+
     async def hard_delete_expired(self, *, before: datetime, limit: int) -> int:
         """notes-gc, see 08-roadmap.md M8 and 02-data-model.md's `idx_notes_gc`.
         Batched via a subquery + LIMIT so one GC pass never holds a single
