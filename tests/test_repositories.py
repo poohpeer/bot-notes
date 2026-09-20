@@ -677,6 +677,50 @@ async def test_soft_delete_by_chat_skips_already_deleted_notes(db_session):
     assert await repo.soft_delete_by_chat(99) == 0
 
 
+async def test_count_active_by_chat(db_session):
+    repo = NoteRepository(db_session)
+    a = await repo.create_text_note(
+        user_id=1, chat_id=99, is_group=True, tg_message_id=520, raw_text="a", visibility=None
+    )
+    await repo.create_text_note(
+        user_id=2, chat_id=99, is_group=True, tg_message_id=521, raw_text="b", visibility=None
+    )
+    await repo.create_text_note(
+        user_id=1, chat_id=100, is_group=True, tg_message_id=522, raw_text="c", visibility=None
+    )
+    assert await repo.count_active_by_chat(99) == 2
+
+    await repo.soft_delete(a.id, 1)
+    assert await repo.count_active_by_chat(99) == 1
+
+
+async def test_count_active_by_chat_with_no_notes_is_zero(db_session):
+    repo = NoteRepository(db_session)
+    assert await repo.count_active_by_chat(999999) == 0
+
+
+async def test_soft_delete_many_deletes_only_the_caller_s_own_notes(db_session):
+    repo = NoteRepository(db_session)
+    mine = await repo.create_text_note(
+        user_id=1, chat_id=1, is_group=False, tg_message_id=530, raw_text="a", visibility="private"
+    )
+    other = await repo.create_text_note(
+        user_id=2, chat_id=1, is_group=False, tg_message_id=531, raw_text="b", visibility="private"
+    )
+
+    count = await repo.soft_delete_many([mine.id, other.id], 1)
+
+    assert count == 1
+    await db_session.refresh(mine)
+    assert mine.deleted_at is not None
+    assert (await repo.get(other.id)).deleted_at is None
+
+
+async def test_soft_delete_many_with_an_empty_list_is_a_no_op(db_session):
+    repo = NoteRepository(db_session)
+    assert await repo.soft_delete_many([], 1) == 0
+
+
 async def test_restore_brings_a_note_back(db_session):
     repo = NoteRepository(db_session)
     note = await repo.create_text_note(

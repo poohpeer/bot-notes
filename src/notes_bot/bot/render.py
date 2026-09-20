@@ -370,6 +370,42 @@ def render_delete_refused() -> str:
     return "Не получилось удалить — заметка уже не ваша или уже удалена."
 
 
+def render_group_only() -> str:
+    """/purge_group (03-ingest.md, "Массовое удаление") — the inverse of
+    render_private_only: wiping "this whole chat" only means something in
+    a group, a private chat has no other members' notes to distinguish it
+    from /list + /delete_selected."""
+    return "Доступно только в группах."
+
+
+def render_purge_group_empty() -> str:
+    return "В этом чате нет активных заметок для удаления."
+
+
+def render_purge_group_prompt(count: int) -> str:
+    return (
+        f"Удалить все {count} заметок в этом чате? Затронет заметки всех "
+        f"участников, но обратимо — /trash восстанавливает свои заметки "
+        f"ещё 30 дней."
+    )
+
+
+def render_purge_group_done(count: int) -> str:
+    return f"Удалено {count} заметок. Восстановить можно из /trash (у каждого — свои)."
+
+
+def render_selection_empty() -> str:
+    return "Список на удаление пуст. Отметьте заметки в /list кнопкой ☐ выбрать."
+
+
+def render_selection_prompt(count: int) -> str:
+    return f"Удалить выбранные {count} заметок?"
+
+
+def render_selection_done(count: int) -> str:
+    return f"Удалено {count} заметок. Восстановить можно из /trash."
+
+
 def render_note_restored() -> str:
     return "Восстановлено."
 

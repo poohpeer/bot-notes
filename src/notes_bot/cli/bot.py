@@ -22,6 +22,7 @@ from notes_bot.clients.conflicts_cache import ConflictsCache
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
+from notes_bot.clients.selection_cache import SelectionCache
 from notes_bot.clients.translate import HttpTranslateClient
 from notes_bot.config import get_settings
 from notes_bot.db.engine import create_engine, create_session_factory
@@ -86,6 +87,7 @@ async def main() -> None:
         search_cache=SearchSessionCache(async_redis.from_url(settings.redis_url)),
         pending_events_cache=PendingEventsCache(async_redis.from_url(settings.redis_url)),
         conflicts_cache=ConflictsCache(async_redis.from_url(settings.redis_url)),
+        selection_cache=SelectionCache(async_redis.from_url(settings.redis_url)),
         fast_queue=Queue("fast", connection=rq_redis),
         heavy_queue=Queue("heavy", connection=rq_redis),
         llm_queue=Queue("llm", connection=rq_redis),

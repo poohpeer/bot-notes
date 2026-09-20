@@ -13,26 +13,32 @@ from notes_bot.bot.logic import (
     _filter_table_event_hits_by_subject,
     cancel_events_table,
     confirm_events_table,
+    count_group_notes,
     delete_note,
+    delete_selected,
     edit_note_by_message,
     edit_note_text,
     list_group_notes,
     list_notes,
     list_trash,
+    purge_group,
     resolve_events_table_conflict,
     restore_note,
     run_search,
     save_note,
     save_voice_note,
+    selection_count,
     set_group_capture_mode,
     show_detail,
     show_more,
     smart_search,
     toggle_privacy,
+    toggle_selection,
 )
 from notes_bot.clients.conflicts_cache import ConflictsCache, PendingConflict
 from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
+from notes_bot.clients.selection_cache import SelectionCache
 from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.config import Settings
 from notes_bot.db.models import Note, NoteChunk
@@ -156,6 +162,7 @@ def deps(db_engine, redis_client):
         heavy_queue=FakeQueue(),
         llm_queue=FakeQueue(),
         settings=_settings(),
+        selection_cache=SelectionCache(redis_client),
     )
 
 
@@ -310,6 +317,74 @@ async def test_restore_note_brings_it_back(deps):
 
     listed = await list_notes(deps, user_id=1, offset=0)
     assert [h.note_id for h in listed.hits] == [saved.note_id]
+
+
+async def test_purge_group_deletes_every_note_regardless_of_author(deps):
+    a = await save_note(deps, user_id=1, chat_id=-100, is_group=True, tg_message_id=70, text="a")
+    b = await save_note(deps, user_id=2, chat_id=-100, is_group=True, tg_message_id=71, text="b")
+    other_chat = await save_note(
+        deps, user_id=1, chat_id=-200, is_group=True, tg_message_id=72, text="c"
+    )
+
+    assert await count_group_notes(deps, chat_id=-100) == 2
+    assert await purge_group(deps, chat_id=-100) == 2
+    assert await count_group_notes(deps, chat_id=-100) == 0
+
+    trash_a = await list_trash(deps, user_id=1, offset=0)
+    trash_b = await list_trash(deps, user_id=2, offset=0)
+    assert a.note_id in [h.note_id for h in trash_a.hits]
+    assert b.note_id in [h.note_id for h in trash_b.hits]
+
+    other_page = await list_group_notes(deps, chat_id=-200, viewer_user_id=1, offset=0)
+    assert other_chat.note_id in [h.note_id for h in other_page.hits]
+
+
+async def test_purge_group_on_an_empty_chat_is_a_no_op(deps):
+    assert await count_group_notes(deps, chat_id=-999) == 0
+    assert await purge_group(deps, chat_id=-999) == 0
+
+
+async def test_toggle_selection_then_delete_selected(deps):
+    a = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=80, text="a")
+    b = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=81, text="b")
+    c = await save_note(deps, user_id=1, chat_id=1, is_group=False, tg_message_id=82, text="c")
+
+    assert await toggle_selection(deps, user_id=1, note_id=a.note_id) is True
+    assert await toggle_selection(deps, user_id=1, note_id=b.note_id) is True
+    assert await selection_count(deps, user_id=1) == 2
+
+    # Toggling again removes it from the cart.
+    assert await toggle_selection(deps, user_id=1, note_id=b.note_id) is False
+    assert await selection_count(deps, user_id=1) == 1
+
+    deleted = await delete_selected(deps, user_id=1)
+    assert deleted == 1
+
+    listed = await list_notes(deps, user_id=1, offset=0)
+    listed_ids = {h.note_id for h in listed.hits}
+    assert a.note_id not in listed_ids
+    assert b.note_id in listed_ids
+    assert c.note_id in listed_ids
+    # The cart is cleared after a confirmed delete.
+    assert await selection_count(deps, user_id=1) == 0
+
+
+async def test_delete_selected_only_touches_the_caller_s_own_notes(deps):
+    """The cart only ever holds ids the caller toggled themselves, but
+    soft_delete_many's own user_id scoping is the real guarantee - not
+    just "nothing else was ever added to the cart"."""
+    other = await save_note(deps, user_id=2, chat_id=1, is_group=False, tg_message_id=83, text="x")
+    assert await toggle_selection(deps, user_id=1, note_id=other.note_id) is True
+
+    deleted = await delete_selected(deps, user_id=1)
+    assert deleted == 0
+
+    other_notes = await list_notes(deps, user_id=2, offset=0)
+    assert other.note_id in [h.note_id for h in other_notes.hits]
+
+
+async def test_delete_selected_with_an_empty_cart_is_a_no_op(deps):
+    assert await delete_selected(deps, user_id=1) == 0
 
 
 async def test_edit_note_text_re_enqueues_processing(deps):

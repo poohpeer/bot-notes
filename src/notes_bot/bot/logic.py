@@ -17,6 +17,7 @@ from notes_bot.clients.conflicts_cache import ConflictsCache, PendingConflict
 from notes_bot.clients.embeddings import HttpEmbeddingClient
 from notes_bot.clients.pending_events_cache import PendingEventsCache
 from notes_bot.clients.search_cache import SearchSessionCache
+from notes_bot.clients.selection_cache import SelectionCache
 from notes_bot.clients.translate import HttpTranslateClient, TranslateServiceError
 from notes_bot.config import Settings
 from notes_bot.db.models import Note
@@ -61,6 +62,10 @@ class Deps:
     # cases confirm_events_table couldn't resolve on its own, between the
     # per-conflict message and the tap that answers it.
     conflicts_cache: ConflictsCache | None = None
+    # /list's multi-select "cart" (03-ingest.md, "Массовое удаление") —
+    # holds note_ids toggled on across possibly several /list pages,
+    # between those taps and the /delete_selected confirm.
+    selection_cache: SelectionCache | None = None
 
 
 @dataclass(frozen=True)
@@ -556,6 +561,61 @@ async def restore_note(deps: Deps, *, note_id: int, user_id: int) -> bool:
         restored = await NoteRepository(session).restore(note_id, user_id)
         await session.commit()
     return restored
+
+
+async def count_group_notes(deps: Deps, *, chat_id: int) -> int:
+    """`/purge_group`'s confirmation prompt (03-ingest.md, "Массовое
+    удаление") - counted before the bulk delete, so the confirm button can
+    say how many notes it's about to touch."""
+    async with deps.session_factory() as session:
+        return await NoteRepository(session).count_active_by_chat(chat_id)
+
+
+async def purge_group(deps: Deps, *, chat_id: int) -> int:
+    """Deliberately not scoped to whoever confirmed it - a group chat's
+    notes are commonly saved by several different members, and "wipe this
+    whole chat" is what the command name says, not "wipe my own notes
+    here" (03-ingest.md, "Массовое удаление"). Same reversibility as any
+    other soft delete: /trash and GC_RETENTION_DAYS both apply unchanged."""
+    async with deps.session_factory() as session:
+        count = await NoteRepository(session).soft_delete_by_chat(chat_id)
+        await session.commit()
+    return count
+
+
+async def toggle_selection(deps: Deps, *, user_id: int, note_id: int) -> bool:
+    """/list's ☐/☑️ multi-select toggle (03-ingest.md, "Массовое
+    удаление"). Returns the new membership state. False (no-op) when
+    selection_cache isn't configured, same as every other optional-cache
+    Deps field's own None-guard."""
+    if deps.selection_cache is None:
+        return False
+    return await deps.selection_cache.toggle(user_id, note_id)
+
+
+async def selection_count(deps: Deps, *, user_id: int) -> int:
+    if deps.selection_cache is None:
+        return 0
+    return len(await deps.selection_cache.get_ids(user_id))
+
+
+async def delete_selected(deps: Deps, *, user_id: int) -> int:
+    """/delete_selected - bulk-deletes exactly the caller's own /list
+    "cart" (03-ingest.md, "Массовое удаление"), same per-owner scoping as
+    a single delete_note, just one UPDATE for the whole cart instead of
+    N. Clears the cart whether or not anything was actually deletable
+    (a note removed from under the selection between toggle and confirm
+    shouldn't leave a stale id haunting the next cart)."""
+    if deps.selection_cache is None:
+        return 0
+    note_ids = await deps.selection_cache.get_ids(user_id)
+    if not note_ids:
+        return 0
+    async with deps.session_factory() as session:
+        deleted = await NoteRepository(session).soft_delete_many(note_ids, user_id)
+        await session.commit()
+    await deps.selection_cache.clear(user_id)
+    return deleted
 
 
 async def edit_note_text(deps: Deps, *, note_id: int, user_id: int, new_text: str) -> bool:

@@ -32,6 +32,7 @@ _COMMON_COMMANDS = [
 PRIVATE_COMMANDS = [
     *_COMMON_COMMANDS,
     BotCommand(command="list", description="Список заметок"),
+    BotCommand(command="delete_selected", description="Удалить отмеченные в /list заметки"),
     BotCommand(command="trash", description="Корзина"),
 ]
 
@@ -39,6 +40,8 @@ GROUP_COMMANDS = [
     *_COMMON_COMMANDS,
     BotCommand(command="capture_all", description="Сохранять все сообщения в чате"),
     BotCommand(command="capture_mentions", description="Сохранять только упоминания бота"),
+    BotCommand(command="delete_selected", description="Удалить отмеченные в /list заметки"),
+    BotCommand(command="purge_group", description="Удалить все заметки в этом чате"),
 ]
 
 

@@ -14,6 +14,11 @@ build or test one. Callback data formats:
     evtable_no:{session_id}    /events_table — cancel, discard the parse
     evconflict_old:{session_id}:{index}   /events_table dedup — keep the existing note
     evconflict_new:{session_id}:{index}   /events_table dedup — replace it with the new text
+    sel:{note_id}          /list — toggle a note in/out of the bulk-delete "cart"
+    selyes                 /delete_selected — confirmed bulk delete
+    selno                  /delete_selected — cancelled (cart stays, not cleared)
+    purgegroupyes          /purge_group — confirmed, wipes the whole chat's notes
+    purgegroupno           /purge_group — cancelled
 """
 
 from __future__ import annotations
@@ -46,12 +51,41 @@ def search_detail_keyboard(session_id: str, note_id: int) -> InlineKeyboardMarku
     )
 
 
-def list_item_keyboard(note_id: int) -> InlineKeyboardMarkup:
+def list_item_keyboard(note_id: int, *, selected: bool = False) -> InlineKeyboardMarkup:
     """/list — every item is the caller's own, so a delete button is always
     safe to render (04-search.md: rendering is a convenience, the real
-    check is the WHERE clause on the mutation itself)."""
+    check is the WHERE clause on the mutation itself). The second row is
+    the bulk-delete "cart" toggle (03-ingest.md, "Массовое удаление") -
+    `selected` shows the CURRENT state, same as `privacy_keyboard`'s own
+    toggle-shows-current-state convention."""
+    select_label = "☑️ в списке на удаление" if selected else "☐ выбрать"
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🗑 удалить", callback_data=f"del:{note_id}")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🗑 удалить", callback_data=f"del:{note_id}")],
+            [InlineKeyboardButton(text=select_label, callback_data=f"sel:{note_id}")],
+        ]
+    )
+
+
+def selection_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить", callback_data="selyes"),
+                InlineKeyboardButton(text="Отмена", callback_data="selno"),
+            ]
+        ]
+    )
+
+
+def purge_group_confirm_keyboard(count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=f"Да, удалить {count}", callback_data="purgegroupyes"),
+                InlineKeyboardButton(text="Отмена", callback_data="purgegroupno"),
+            ]
+        ]
     )
 
 

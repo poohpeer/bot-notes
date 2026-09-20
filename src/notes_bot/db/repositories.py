@@ -438,6 +438,31 @@ class NoteRepository:
         )
         return result.rowcount
 
+    async def count_active_by_chat(self, chat_id: int) -> int:
+        """`/purge_group`'s confirmation prompt (03-ingest.md, "Массовое
+        удаление") - shown before the bulk delete, not after, so the
+        button label can say how many notes it's about to touch."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(Note)
+            .where(Note.chat_id == chat_id, Note.deleted_at.is_(None))
+        )
+        return result.scalar_one()
+
+    async def soft_delete_many(self, note_ids: list[int], user_id: int) -> int:
+        """`/delete_selected`'s bulk path (03-ingest.md, "Массовое
+        удаление") - same `user_id` scoping as the single-note `soft_delete`
+        (a /list multi-select "cart" only ever holds the caller's own
+        notes to begin with), just one UPDATE instead of N."""
+        if not note_ids:
+            return 0
+        result = await self._session.execute(
+            update(Note)
+            .where(Note.id.in_(note_ids), Note.user_id == user_id, Note.deleted_at.is_(None))
+            .values(deleted_at=func.now())
+        )
+        return result.rowcount
+
     async def hard_delete_expired(self, *, before: datetime, limit: int) -> int:
         """notes-gc, see 08-roadmap.md M8 and 02-data-model.md's `idx_notes_gc`.
         Batched via a subquery + LIMIT so one GC pass never holds a single

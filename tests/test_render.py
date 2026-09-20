@@ -20,6 +20,7 @@ from notes_bot.bot.render import (
     render_events_table_started,
     render_events_table_usage,
     render_group_note_saved,
+    render_group_only,
     render_group_welcome,
     render_list_empty,
     render_no_more_results,
@@ -28,10 +29,16 @@ from notes_bot.bot.render import (
     render_places,
     render_privacy_toggle_confirmation,
     render_processing_failed,
+    render_purge_group_done,
+    render_purge_group_empty,
+    render_purge_group_prompt,
     render_search_card,
     render_search_debug_empty,
     render_search_expired,
     render_search_summary_card,
+    render_selection_done,
+    render_selection_empty,
+    render_selection_prompt,
     render_smart_answer_debug,
     render_stage_timings,
     render_token_usage,
@@ -373,6 +380,19 @@ def test_delete_flow_messages():
     assert render_note_deleted()
     assert render_delete_refused()
     assert render_note_restored()
+
+
+def test_selection_flow_messages_include_the_count():
+    assert render_selection_empty()
+    assert "5" in render_selection_prompt(5)
+    assert "5" in render_selection_done(5)
+
+
+def test_purge_group_flow_messages_include_the_count():
+    assert render_group_only()
+    assert render_purge_group_empty()
+    assert "30" in render_purge_group_prompt(30)
+    assert "30" in render_purge_group_done(30)
 
 
 def test_edit_flow_messages():

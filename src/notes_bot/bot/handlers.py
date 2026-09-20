@@ -10,6 +10,11 @@ see on_group_message_edited — (ADR-10), a welcome message on join,
 the room (on_list_group — never a member's own private-chat notes, see
 NoteRepository.list_group). /trash stays private-only.
 
+Bulk delete (03-ingest.md, "Массовое удаление"): /list's ☐/☑️ toggle +
+/delete_selected for a hand-picked few of the caller's own notes, in
+either chat type; /purge_group (groups only) wipes a whole chat's notes
+regardless of who saved them.
+
 /events_table (both chat types): an album of screenshots with caption
 "/events_table" (a tab name is optional) — buffered in-process
 (on_events_table_photo, also on_events_table_photo_edited for a caption
@@ -48,8 +53,10 @@ from notes_bot.bot.keyboards import (
     list_item_keyboard,
     list_more_keyboard,
     privacy_keyboard,
+    purge_group_confirm_keyboard,
     search_detail_keyboard,
     search_more_keyboard,
+    selection_confirm_keyboard,
     trash_item_keyboard,
     trash_more_keyboard,
 )
@@ -58,21 +65,26 @@ from notes_bot.bot.logic import (
     NotesPage,
     cancel_events_table,
     confirm_events_table,
+    count_group_notes,
     delete_note,
+    delete_selected,
     edit_note_by_message,
     list_group_notes,
     list_notes,
     list_trash,
+    purge_group,
     resolve_events_table_conflict,
     restore_note,
     run_search,
     save_note,
     save_voice_note,
+    selection_count,
     set_group_capture_mode,
     show_detail,
     show_more,
     smart_search,
     toggle_privacy,
+    toggle_selection,
 )
 from notes_bot.bot.render import (
     render_capture_mode_changed,
@@ -88,6 +100,7 @@ from notes_bot.bot.render import (
     render_events_table_started,
     render_events_table_usage,
     render_group_note_saved,
+    render_group_only,
     render_group_welcome,
     render_list_empty,
     render_no_more_results,
@@ -96,9 +109,15 @@ from notes_bot.bot.render import (
     render_note_saved,
     render_privacy_toggle_confirmation,
     render_private_only,
+    render_purge_group_done,
+    render_purge_group_empty,
+    render_purge_group_prompt,
     render_search_card,
     render_search_expired,
     render_search_summary_card,
+    render_selection_done,
+    render_selection_empty,
+    render_selection_prompt,
     render_smart_answer_pending,
     render_trash_empty,
     render_voice_note_saved,
@@ -439,7 +458,7 @@ async def on_list(message: Message, deps: Deps) -> None:
     # ones — see on_list_group below for the group variant, which is
     # scoped to the room instead (never a user's private DMs' notes).
     page = await list_notes(deps, user_id=message.from_user.id, offset=0)
-    await _send_notes_page(message, page, is_trash=False)
+    await _send_notes_page(message, page, deps, is_trash=False, viewer_user_id=message.from_user.id)
 
 
 @router.message(Command("list"), F.chat.type.in_(_GROUP_TYPES))
@@ -452,7 +471,7 @@ async def on_list_group(message: Message, deps: Deps) -> None:
     page = await list_group_notes(
         deps, chat_id=message.chat.id, viewer_user_id=message.from_user.id, offset=0
     )
-    await _send_notes_page(message, page, is_trash=False)
+    await _send_notes_page(message, page, deps, is_trash=False, viewer_user_id=message.from_user.id)
 
 
 @router.callback_query(F.data.startswith("listmore:"))
@@ -468,13 +487,15 @@ async def on_list_more(callback: CallbackQuery, deps: Deps) -> None:
     else:
         page = await list_notes(deps, user_id=callback.from_user.id, offset=offset)
     await callback.answer()
-    await _send_notes_page(callback.message, page, is_trash=False)
+    await _send_notes_page(
+        callback.message, page, deps, is_trash=False, viewer_user_id=callback.from_user.id
+    )
 
 
 @router.message(Command("trash"), F.chat.type == "private")
 async def on_trash(message: Message, deps: Deps) -> None:
     page = await list_trash(deps, user_id=message.from_user.id, offset=0)
-    await _send_notes_page(message, page, is_trash=True)
+    await _send_notes_page(message, page, deps, is_trash=True, viewer_user_id=message.from_user.id)
 
 
 @router.message(Command("trash"), F.chat.type.in_(_GROUP_TYPES))
@@ -491,22 +512,36 @@ async def on_trash_more(callback: CallbackQuery, deps: Deps) -> None:
     offset = int(callback.data.removeprefix("trashmore:"))
     page = await list_trash(deps, user_id=callback.from_user.id, offset=offset)
     await callback.answer()
-    await _send_notes_page(callback.message, page, is_trash=True)
+    await _send_notes_page(
+        callback.message, page, deps, is_trash=True, viewer_user_id=callback.from_user.id
+    )
 
 
-async def _send_notes_page(message: Message, page: NotesPage, *, is_trash: bool) -> None:
+async def _send_notes_page(
+    message: Message, page: NotesPage, deps: Deps, *, is_trash: bool, viewer_user_id: int
+) -> None:
     if not page.hits:
         await message.answer(render_trash_empty() if is_trash else render_list_empty())
         return
+    # One Redis call for the whole page, not one per card — the cart is
+    # small and this only needs "is this id in it", not the full set's
+    # membership semantics per card.
+    selected_ids: set[int] = set()
+    if not is_trash and deps.selection_cache is not None:
+        selected_ids = set(await deps.selection_cache.get_ids(viewer_user_id))
     for hit in page.hits:
         if is_trash:
             keyboard = trash_item_keyboard(hit.note_id)
         else:
             # Group /list can show notes saved by other members — only the
-            # actual owner gets a delete button (soft_delete's own WHERE
-            # clause is the real check; this is the same rendering
+            # actual owner gets a delete/select keyboard (soft_delete's own
+            # WHERE clause is the real check; this is the same rendering
             # convenience as render_search_card's is_owner gate).
-            keyboard = list_item_keyboard(hit.note_id) if hit.is_owner else None
+            keyboard = (
+                list_item_keyboard(hit.note_id, selected=hit.note_id in selected_ids)
+                if hit.is_owner
+                else None
+            )
         await message.answer(render_search_card(hit), reply_markup=keyboard, parse_mode="HTML")
     if page.has_more:
         more_keyboard = (
@@ -548,6 +583,75 @@ async def on_restore(callback: CallbackQuery, deps: Deps) -> None:
     await callback.message.edit_text(
         render_note_restored() if restored else render_delete_refused()
     )
+
+
+# ---------------------------------------------------------------------------
+# /list's bulk-delete "cart" and /purge_group — see 03-ingest.md,
+# "Массовое удаление"
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("sel:"))
+async def on_toggle_selection(callback: CallbackQuery, deps: Deps) -> None:
+    note_id = int(callback.data.removeprefix("sel:"))
+    selected = await toggle_selection(deps, user_id=callback.from_user.id, note_id=note_id)
+    await callback.answer("Добавлено в список на удаление" if selected else "Убрано из списка")
+    await callback.message.edit_reply_markup(
+        reply_markup=list_item_keyboard(note_id, selected=selected)
+    )
+
+
+@router.message(Command("delete_selected"))
+async def on_delete_selected(message: Message, deps: Deps) -> None:
+    count = await selection_count(deps, user_id=message.from_user.id)
+    if count == 0:
+        await message.reply(render_selection_empty())
+        return
+    await message.reply(render_selection_prompt(count), reply_markup=selection_confirm_keyboard())
+
+
+@router.callback_query(F.data == "selyes")
+async def on_delete_selected_confirmed(callback: CallbackQuery, deps: Deps) -> None:
+    count = await delete_selected(deps, user_id=callback.from_user.id)
+    await callback.answer()
+    await callback.message.edit_text(render_selection_done(count))
+
+
+@router.callback_query(F.data == "selno")
+async def on_delete_selected_cancelled(callback: CallbackQuery) -> None:
+    # The cart itself isn't cleared — "not right now" shouldn't lose
+    # whatever was already picked (03-ingest.md, "Массовое удаление").
+    await callback.answer()
+    await callback.message.delete()
+
+
+@router.message(Command("purge_group"), F.chat.type.in_(_GROUP_TYPES))
+async def on_purge_group(message: Message, deps: Deps) -> None:
+    count = await count_group_notes(deps, chat_id=message.chat.id)
+    if count == 0:
+        await message.reply(render_purge_group_empty())
+        return
+    await message.reply(
+        render_purge_group_prompt(count), reply_markup=purge_group_confirm_keyboard(count)
+    )
+
+
+@router.message(Command("purge_group"), F.chat.type == "private")
+async def on_purge_group_private(message: Message) -> None:
+    await message.reply(render_group_only())
+
+
+@router.callback_query(F.data == "purgegroupyes")
+async def on_purge_group_confirmed(callback: CallbackQuery, deps: Deps) -> None:
+    count = await purge_group(deps, chat_id=callback.message.chat.id)
+    await callback.answer()
+    await callback.message.edit_text(render_purge_group_done(count))
+
+
+@router.callback_query(F.data == "purgegroupno")
+async def on_purge_group_cancelled(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.delete()
 
 
 # ---------------------------------------------------------------------------
