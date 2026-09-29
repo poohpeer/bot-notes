@@ -336,8 +336,11 @@ ai-proxy - `http://ai-proxy:8787`.
 ### Промпты
 
 Живут в `notes_bot/clients/prompts/` как отдельные файлы, по одному на
-задачу: `title.md`, `tags.md`, `place.md`, `summary.md`, `dupes.md`,
-`query_rewrite.md`, `rag_answer.md`. Причины: их правят чаще кода, их удобно
+задачу: `enrich.md` (заголовок+теги+суммаризация+коррекции ASR+
+место/места, один комбинированный вызов - 03-ingest.md, "Шаг 6"),
+`summary.md` (тот же /debug-превью, отдельно от `enrich.md` - см. его
+docstring в enrich.py), `dupes.md`, `rag_answer.md`, `events_table.md`,
+`table_event_subjects.md`. Причины: их правят чаще кода, их удобно
 диффать, и они нужны в тестах как эталон.
 
 Общие требования ко всем промптам:

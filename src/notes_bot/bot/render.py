@@ -145,13 +145,13 @@ def render_processing_failed() -> str:
 def _google_maps_search_url(query: str) -> str:
     # No geocoding step anywhere in this pipeline — a search URL (Google's
     # own documented fallback for "I have a name/address, not coordinates")
-    # instead of a pin, since generate_places (enrich.py) only ever extracts
+    # instead of a pin, since enrich() (enrich.py) only ever extracts
     # text out of a caption/ASR transcript, never a verified lat/lng.
     return f"https://www.google.com/maps/search/?api=1&query={quote(query)}"
 
 
 def render_places(structured: dict) -> list[str]:
-    """`structured["places"]` — see enrich.py's `generate_places`: a
+    """`structured["places"]` — see enrich.py's `enrich()`: a
     youtube/instagram note's places, extracted from its caption/transcript.
     One line per place, the place's own name rendered as an HTML link
     (`<a href="...">`) to a Google Maps search built from whatever text the
@@ -179,7 +179,7 @@ def render_places(structured: dict) -> list[str]:
         # description" - mixing in a venue name Maps has no listing for
         # (a small unlisted shop) or noise like "напротив X" measurably
         # threw the match off (03-ingest.md, "Места из видео"). Falls back
-        # to name+hint only when generate_places found no clean address.
+        # to name+hint only when enrich() found no clean address.
         address = place.get("address")
         hint = place.get("location_hint")
         if isinstance(address, str) and address.strip():

@@ -13,6 +13,8 @@ here.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from notes_bot.clients.llm import LLMClient
 from notes_bot.clients.prompts import load_prompt
 
@@ -23,32 +25,36 @@ _HEAD_CHARS = 6000
 _TITLE_MAX_CHARS = 60
 _TAGS_MAX = 5
 
-_TITLE_SCHEMA = {
-    "type": "object",
-    "properties": {"title": {"type": ["string", "null"]}},
-    "required": ["title"],
-}
-_TAGS_SCHEMA = {
-    "type": "object",
-    "properties": {"tags": {"type": "array", "items": {"type": "string"}}},
-    "required": ["tags"],
-}
 _SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {"summary": {"type": ["string", "null"]}},
     "required": ["summary"],
 }
-_PLACE_SCHEMA = {
+_ENRICH_SCHEMA = {
     "type": "object",
     "properties": {
-        "name": {"type": ["string", "null"]},
-        "district": {"type": ["string", "null"]},
-        "cuisine": {"type": ["string", "null"]},
-    },
-}
-_PLACES_SCHEMA = {
-    "type": "object",
-    "properties": {
+        "title": {"type": ["string", "null"]},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": ["string", "null"]},
+        "corrections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "wrong": {"type": "string"},
+                    "correct": {"type": "string"},
+                },
+                "required": ["wrong", "correct"],
+            },
+        },
+        "place": {
+            "type": ["object", "null"],
+            "properties": {
+                "name": {"type": ["string", "null"]},
+                "district": {"type": ["string", "null"]},
+                "cuisine": {"type": ["string", "null"]},
+            },
+        },
         "places": {
             "type": "array",
             "items": {
@@ -59,9 +65,23 @@ _PLACES_SCHEMA = {
                     "location_hint": {"type": ["string", "null"]},
                 },
             },
-        }
+        },
     },
-    "required": ["places"],
+    "required": ["title", "tags", "summary"],
+}
+# Only these source_types plausibly carry ASR-transcribed speech — a typed
+# text/page note has nothing for "corrections" to fix, so the field is
+# dropped even if the model filled it anyway (defense in depth: the
+# prompt's own "заполняй только применимое" instruction is the first line
+# of defense, not the only one — see enrich()'s per-source_type gating
+# below, same reasoning for `place`/`places`).
+_ASR_SOURCE_TYPES = {"youtube", "instagram", "voice"}
+_NOTE_TYPE_LABELS = {
+    "map": "Тип: место на карте (ссылка Google Maps).",
+    "youtube": "Тип: видео с YouTube — описание и/или расшифровка речи.",
+    "instagram": "Тип: видео с Instagram — описание и/или расшифровка речи.",
+    "voice": "Тип: голосовое сообщение — расшифровка речи (ASR).",
+    "page": "Тип: заметка со страницы сайта.",
 }
 _DUPES_SCHEMA = {
     "type": "object",
@@ -73,38 +93,12 @@ _DUPES_SCHEMA = {
 }
 
 
-async def generate_title(llm: LLMClient, text: str, *, timeout_s: float) -> str | None:
-    result = await llm.complete(
-        system=load_prompt("title"),
-        user=text[:_HEAD_CHARS],
-        json_schema=_TITLE_SCHEMA,
-        timeout_s=timeout_s,
-    )
-    if result.parsed is None:
-        return None
-    title = result.parsed.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return None
-    return title.strip()[:_TITLE_MAX_CHARS]
-
-
-async def generate_tags(llm: LLMClient, text: str, *, timeout_s: float) -> list[str]:
-    result = await llm.complete(
-        system=load_prompt("tags"),
-        user=text[:_HEAD_CHARS],
-        json_schema=_TAGS_SCHEMA,
-        timeout_s=timeout_s,
-    )
-    if result.parsed is None:
-        return []
-    tags = result.parsed.get("tags")
-    if not isinstance(tags, list):
-        return []
-    cleaned = [t.strip().lstrip("#").lower() for t in tags if isinstance(t, str) and t.strip()]
-    return cleaned[:_TAGS_MAX]
-
-
 async def generate_summary(llm: LLMClient, text: str, *, timeout_s: float) -> str | None:
+    """Also used standalone by /debug's own summary preview
+    (queue/tasks.py's process_note_async) - kept separate from `enrich()`
+    below rather than folded in, since that call happens synchronously
+    inside process_note, before enrich_note (and its combined call) ever
+    runs."""
     result = await llm.complete(
         system=load_prompt("summary"), user=text, json_schema=_SUMMARY_SCHEMA, timeout_s=timeout_s
     )
@@ -114,60 +108,122 @@ async def generate_summary(llm: LLMClient, text: str, *, timeout_s: float) -> st
     return summary.strip() if isinstance(summary, str) and summary.strip() else None
 
 
-async def generate_place(llm: LLMClient, text: str, *, timeout_s: float) -> dict:
+@dataclass(frozen=True)
+class Correction:
+    wrong: str
+    correct: str
+
+
+@dataclass(frozen=True)
+class EnrichResult:
+    title: str | None = None
+    tags: list[str] = field(default_factory=list)
+    summary: str | None = None
+    corrections: list[Correction] = field(default_factory=list)
+    place: dict = field(default_factory=dict)
+    places: list[dict] = field(default_factory=list)
+
+
+async def enrich(llm: LLMClient, text: str, *, source_type: str, timeout_s: float) -> EnrichResult:
+    """One combined call for title+tags+summary+corrections+place/places —
+    see docs/architecture/03-ingest.md, "Обогащение": these used to be up
+    to 4 separate ai-proxy calls (this codebase's earlier
+    generate_title/generate_tags/generate_place/generate_places), each
+    re-sending the same note text. Merging them cuts total enrich latency
+    to roughly one call instead of the sum of several, and lets the model
+    produce a *consistent* read of the note once instead of 4 independent
+    ones. `find_duplicate` stays a separate call (enrich_note_async runs
+    it in parallel via asyncio.gather) - it needs a fundamentally
+    different input (candidate notes to compare against), not just this
+    note's own text, so folding it in would mean stuffing other people's
+    — well, the same owner's — note text into a "describe this note"
+    prompt.
+
+    `source_type` gates which of `corrections`/`place`/`places` are kept
+    even if the model filled them anyway - defense in depth on top of the
+    prompt's own "заполняй только применимое"."""
+    label = _NOTE_TYPE_LABELS.get(source_type, "Тип: заметка.")
     result = await llm.complete(
-        system=load_prompt("place"),
-        user=text[:_HEAD_CHARS],
-        json_schema=_PLACE_SCHEMA,
+        system=load_prompt("enrich"),
+        user=f"{label}\n\n{text[:_HEAD_CHARS]}",
+        json_schema=_ENRICH_SCHEMA,
         timeout_s=timeout_s,
     )
     if result.parsed is None:
-        return {}
-    return {k: v for k, v in result.parsed.items() if v}
+        return EnrichResult()
+    parsed = result.parsed
 
+    title = parsed.get("title")
+    title = title.strip()[:_TITLE_MAX_CHARS] if isinstance(title, str) and title.strip() else None
 
-async def generate_places(llm: LLMClient, text: str, *, timeout_s: float) -> list[dict]:
-    """For `youtube`/`instagram` notes: places mentioned in a video's
-    caption/transcript, each `{"name": ..., "address": ..., "location_hint":
-    ...}` — see 04-search.md/03-ingest.md, "Места из видео". Unlike
-    `generate_place`, a video can plausibly mention several places, not
-    describe exactly one.
-
-    `address` (a genuine, formal street address - street + house number,
-    ideally + city) is kept separate from `location_hint` (everything else:
-    district, "next to X", spoken-only landmarks) precisely because
-    `render.render_places` builds its Google Maps search query from
-    `address` alone when present - mixing in the place's own `name` or a
-    relative description ("напротив X") measurably threw off Maps' fuzzy
-    text search for a small venue with no listing of its own (03-ingest.md,
-    "Места из видео")."""
-    result = await llm.complete(
-        system=load_prompt("places"),
-        user=text[:_HEAD_CHARS],
-        json_schema=_PLACES_SCHEMA,
-        timeout_s=timeout_s,
+    tags_raw = parsed.get("tags")
+    tags = (
+        [t.strip().lstrip("#").lower() for t in tags_raw if isinstance(t, str) and t.strip()][
+            :_TAGS_MAX
+        ]
+        if isinstance(tags_raw, list)
+        else []
     )
-    if result.parsed is None:
-        return []
-    places = result.parsed.get("places")
-    if not isinstance(places, list):
-        return []
-    cleaned = []
-    for place in places:
-        if not isinstance(place, dict):
-            continue
-        name = place.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        cleaned_place = {"name": name.strip()}
-        address = place.get("address")
-        if isinstance(address, str) and address.strip():
-            cleaned_place["address"] = address.strip()
-        hint = place.get("location_hint")
-        if isinstance(hint, str) and hint.strip():
-            cleaned_place["location_hint"] = hint.strip()
-        cleaned.append(cleaned_place)
-    return cleaned
+
+    summary = parsed.get("summary")
+    summary = summary.strip() if isinstance(summary, str) and summary.strip() else None
+
+    corrections: list[Correction] = []
+    if source_type in _ASR_SOURCE_TYPES:
+        for item in parsed.get("corrections") or []:
+            if not isinstance(item, dict):
+                continue
+            wrong, correct = item.get("wrong"), item.get("correct")
+            if (
+                isinstance(wrong, str)
+                and wrong.strip()
+                and isinstance(correct, str)
+                and correct.strip()
+            ):
+                corrections.append(Correction(wrong=wrong, correct=correct.strip()))
+
+    place: dict = {}
+    if source_type == "map":
+        raw_place = parsed.get("place")
+        if isinstance(raw_place, dict):
+            place = {k: v for k, v in raw_place.items() if v}
+
+    places: list[dict] = []
+    if source_type in ("youtube", "instagram"):
+        raw_places = parsed.get("places")
+        if isinstance(raw_places, list):
+            for item in raw_places:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    continue
+                cleaned_place = {"name": name.strip()}
+                address = item.get("address")
+                if isinstance(address, str) and address.strip():
+                    cleaned_place["address"] = address.strip()
+                hint = item.get("location_hint")
+                if isinstance(hint, str) and hint.strip():
+                    cleaned_place["location_hint"] = hint.strip()
+                places.append(cleaned_place)
+
+    return EnrichResult(
+        title=title, tags=tags, summary=summary, corrections=corrections, place=place, places=places
+    )
+
+
+def apply_corrections(text: str, corrections: list[Correction]) -> str:
+    """Exact substring replace, one correction at a time - never a
+    freeform rewrite: `enrich()`'s prompt asks the model for `wrong`
+    exactly as written in the source text, precisely so this can be a
+    plain `str.replace` instead of trusting the model to reproduce the
+    whole text faithfully. A `wrong` that doesn't actually occur (the
+    model misquoted it) is silently skipped, not an error - best-effort,
+    same as everywhere else in this module."""
+    for correction in corrections:
+        if correction.wrong and correction.wrong in text:
+            text = text.replace(correction.wrong, correction.correct)
+    return text
 
 
 async def find_duplicate(

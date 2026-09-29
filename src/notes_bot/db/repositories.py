@@ -258,7 +258,7 @@ class NoteRepository:
     ) -> None:
         """`table_event` notes (03-ingest.md, "/events_table") already carry
         their own tags from the extraction call itself (event type +
-        topic_tags) - `enrich_note`'s own `generate_tags` would overwrite
+        topic_tags) - `enrich_note`'s own `enrich()` would overwrite
         them with a guess made from a single short event line, with no
         knowledge of the table's broader topic. `enrich_status='skipped'`
         here mirrors `mark_enrich_skipped` (process_note_async never

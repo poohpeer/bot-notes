@@ -64,14 +64,7 @@ from notes_bot.db.repositories import ChunkRepository, NoteRepository, UserSetti
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.chunking import chunk
-from notes_bot.enrich import (
-    find_duplicate,
-    generate_place,
-    generate_places,
-    generate_summary,
-    generate_tags,
-    generate_title,
-)
+from notes_bot.enrich import apply_corrections, enrich, find_duplicate, generate_summary
 from notes_bot.events_table import extract_events_table
 from notes_bot.extractors.base import Extractor
 from notes_bot.extractors.instagram import InstagramExtractor
@@ -447,11 +440,15 @@ async def enrich_note_async(
     llm_enabled: bool,
     timeout_s: float,
     dupe_candidate_k: int = 50,
+    translate_client: HttpTranslateClient | None = None,
 ) -> None:
-    """Never touches status/extracted_text/chunks (see
+    """Barely touches status/extracted_text/chunks (see
     NoteRepository.set_enrichment) — a note is already fully findable
-    before this ever runs; this only adds title/tags/summary/structured
-    fields and, for a `map` note, place details. See 03-ingest.md, "Шаг 6".
+    before this ever runs; this mainly adds title/tags/summary/structured
+    fields and, for a `map`/video note, place details. See 03-ingest.md,
+    "Шаг 6". The one exception is an ASR-transcript correction (below):
+    that *does* touch extracted_text/raw_text and re-embeds, same as an
+    explicit user edit — everything else here is pure addition.
     """
     async with session_factory() as session:
         note_repo = NoteRepository(session)
@@ -479,19 +476,11 @@ async def enrich_note_async(
         text = note.extracted_text or note.raw_text or ""
 
         try:
-            title = await generate_title(llm_client, text, timeout_s=timeout_s)
-            tags = await generate_tags(llm_client, text, timeout_s=timeout_s)
-            summary = await generate_summary(llm_client, text, timeout_s=timeout_s)
-
-            structured: dict = {}
-            if note.source_type == "map":
-                structured = await generate_place(llm_client, text, timeout_s=timeout_s)
-            elif note.source_type in ("youtube", "instagram"):
-                places = await generate_places(llm_client, text, timeout_s=timeout_s)
-                if places:
-                    structured = {"places": places}
-
+            # Fast, non-LLM prep for find_duplicate — done before the
+            # parallel LLM batch below so its own ai-proxy call can join
+            # that batch instead of waiting behind it.
             own_embedding = await chunk_repo.get_first_chunk_embedding(note_id)
+            candidates: list[tuple[int, str]] = []
             if own_embedding is not None:
                 hits = await search_notes(
                     session,
@@ -503,22 +492,78 @@ async def enrich_note_async(
                     offset=0,
                 )
                 candidates = [(hit.note_id, hit.chunk_text) for hit in hits]
-                duplicate_id = await find_duplicate(
+
+            # enrich() (title/tags/summary/corrections/place/places, one
+            # call) and find_duplicate (a structurally different task —
+            # compares against *other* notes, doesn't fit the same
+            # prompt) run concurrently: neither's output depends on the
+            # other's, so there's no reason to pay for them serially.
+            enrich_result, duplicate_id = await asyncio.gather(
+                enrich(llm_client, text, source_type=note.source_type, timeout_s=timeout_s),
+                find_duplicate(
                     llm_client, new_text=text, candidates=candidates, timeout_s=timeout_s
+                ),
+            )
+
+            structured: dict = dict(enrich_result.place) if enrich_result.place else {}
+            if enrich_result.places:
+                structured = {"places": enrich_result.places}
+            if duplicate_id is not None:
+                # Surfacing this to the user needs the same worker->bot
+                # notification channel noted as a gap in bot/handlers.py
+                # — not built yet. Persisted here so it isn't lost.
+                structured = {**structured, "possible_duplicate_of": duplicate_id}
+                log.info(
+                    "enrich_note: note_id=%s possible duplicate of note_id=%s",
+                    note_id,
+                    duplicate_id,
                 )
-                if duplicate_id is not None:
-                    # Surfacing this to the user needs the same worker->bot
-                    # notification channel noted as a gap in bot/handlers.py
-                    # — not built yet. Persisted here so it isn't lost.
-                    structured = {**structured, "possible_duplicate_of": duplicate_id}
+
+            if enrich_result.corrections and note.extracted_text:
+                # Only extracted_text ever gets corrected — corrections
+                # only exist for youtube/instagram/voice (_ASR_SOURCE_TYPES),
+                # and those source_types' raw_text is the source URL, not
+                # the transcript (03-ingest.md, "Текст, идущий в индекс");
+                # there's nothing meaningful to correct there. Guarded on
+                # `note.extracted_text` truthy — a degraded extraction
+                # (empty extracted_text) has no real transcript to fix.
+                corrected_text = apply_corrections(note.extracted_text, enrich_result.corrections)
+                if corrected_text != note.extracted_text:
+                    await note_repo.record_extraction(
+                        note_id, extracted_text=corrected_text, lang=note.lang, error=note.error
+                    )
+                    chunks = chunk(corrected_text)
+                    if chunks:
+                        texts_to_embed = [c.text for c in chunks]
+                        if translate_client is not None:
+                            try:
+                                texts_to_embed = await translate_client.translate_passages(
+                                    texts_to_embed
+                                )
+                            except TranslateServiceError as exc:
+                                log.warning(
+                                    "enrich_note: note_id=%s translate failed re-embedding "
+                                    "after correction: %s",
+                                    note_id,
+                                    exc,
+                                )
+                        vectors = await embedding_client.embed_passages(texts_to_embed)
+                        new_chunks = ChunkRepository.from_domain_chunks(chunks, vectors)
+                        await chunk_repo.replace_chunks(
+                            note_id, new_chunks, embedding_model=embedding_client.model_name
+                        )
                     log.info(
-                        "enrich_note: note_id=%s possible duplicate of note_id=%s",
+                        "enrich_note: note_id=%s applied %d ASR correction(s)",
                         note_id,
-                        duplicate_id,
+                        len(enrich_result.corrections),
                     )
 
             await note_repo.set_enrichment(
-                note_id, title=title, summary=summary, tags=tags, structured=structured
+                note_id,
+                title=enrich_result.title,
+                summary=enrich_result.summary,
+                tags=enrich_result.tags,
+                structured=structured,
             )
             await session.commit()
             log.info("enrich_note: note_id=%s done", note_id)
@@ -567,6 +612,7 @@ def enrich_note(note_id: int) -> None:
             embedding_client=embedding_client,
             llm_enabled=settings.llm_enabled,
             timeout_s=settings.llm_enrich_timeout_s,
+            translate_client=_get_translate_client(settings),
         )
     )
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from notes_bot.clients.llm import LLMResult, LLMServiceError
+from notes_bot.clients.prompts import load_prompt
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import NoteRepository
 from notes_bot.queue.tasks import enrich_note_async
@@ -24,13 +26,26 @@ class FakeEmbeddingClient:
         raise NotImplementedError
 
 
-class ScriptedLLMClient:
-    """One fixed parsed payload per prompt-file keyword found in `system`,
-    so a single client can answer title/tags/summary/place/dupes
-    differently within one test."""
+class ReembeddingClient(FakeEmbeddingClient):
+    """Only the correction-and-reembed path (enrich_note_async) actually
+    calls embed_passages — every other test in this file must never reach
+    it, so FakeEmbeddingClient's own NotImplementedError stays the
+    default; this subclass opts specific tests in."""
 
-    def __init__(self, **by_keyword):
-        self._by_keyword = by_keyword
+    async def embed_passages(self, texts):
+        return [[0.0, 0.0] + [0.0] * 766 for _ in texts]
+
+
+class ScriptedLLMClient:
+    """One scripted reply for enrich()'s combined call, another for
+    find_duplicate's - distinguished by system prompt identity (each is
+    its own prompt file, loaded once via load_prompt)."""
+
+    def __init__(self, *, enrich=None, dupes=None):
+        self._enrich_prompt = load_prompt("enrich")
+        self._dupes_prompt = load_prompt("dupes")
+        self._enrich = enrich
+        self._dupes = dupes
         self.calls: list[dict] = []
         self.fail_with: Exception | None = None
 
@@ -38,10 +53,17 @@ class ScriptedLLMClient:
         self.calls.append({"system": system, "user": user})
         if self.fail_with:
             raise self.fail_with
-        for keyword, parsed in self._by_keyword.items():
-            if keyword in system:
-                return LLMResult(text="", parsed=parsed, model="scripted", usage=None)
+        if system == self._enrich_prompt:
+            return LLMResult(text="", parsed=self._enrich, model="scripted", usage=None)
+        if system == self._dupes_prompt:
+            return LLMResult(text="", parsed=self._dupes, model="scripted", usage=None)
         return LLMResult(text="", parsed=None, model="scripted", usage=None)
+
+
+def _enrich_payload(**overrides) -> dict:
+    payload = {"title": None, "tags": [], "summary": None}
+    payload.update(overrides)
+    return payload
 
 
 def _vec(x: float, y: float) -> list[float]:
@@ -128,7 +150,7 @@ async def test_enrich_note_skips_a_note_not_yet_done(factory):
 
 async def test_enrich_note_marks_skipped_when_llm_disabled(factory):
     note_id = await factory.insert_done_note()
-    llm = ScriptedLLMClient(title={"title": "should not be used"})
+    llm = ScriptedLLMClient(enrich=_enrich_payload(title="should not be used"))
 
     await enrich_note_async(
         note_id,
@@ -148,15 +170,10 @@ async def test_enrich_note_marks_skipped_when_llm_disabled(factory):
 
 async def test_enrich_note_writes_title_tags_summary(factory):
     note_id = await factory.insert_done_note(raw_text="a hinkali restaurant review")
-    # Keywords match a distinctive word from each prompt file (title.md,
-    # tags.md, summary.md) — all in Russian, so "title"/"tags"/"summary"
-    # themselves never appear in the actual system prompt text.
     llm = ScriptedLLMClient(
-        **{
-            "заголовок": {"title": "Хинкальная"},
-            "тегов": {"tags": ["food", "tbilisi"]},
-            "пересказа": {"summary": "A short review"},
-        }
+        enrich=_enrich_payload(
+            title="Хинкальная", tags=["food", "tbilisi"], summary="A short review"
+        )
     )
 
     await enrich_note_async(
@@ -176,12 +193,13 @@ async def test_enrich_note_writes_title_tags_summary(factory):
         assert note.enrich_status == "done"
 
 
-async def test_enrich_note_only_calls_place_prompt_for_map_notes(factory):
+async def test_enrich_note_structured_empty_for_text_notes(factory):
+    """`place`/`places` are gated on source_type inside enrich() itself -
+    a plain text note gets neither, even if the model filled one anyway."""
     text_note_id = await factory.insert_done_note(source_type="text")
-    # generate_place() is gated on source_type == "map" in enrich_note_async
-    # itself — no scripted reply needed here, since it should never be
-    # called at all for a plain text note.
-    llm = ScriptedLLMClient()
+    llm = ScriptedLLMClient(
+        enrich=_enrich_payload(place={"name": "should be dropped for source_type=text"})
+    )
 
     await enrich_note_async(
         text_note_id,
@@ -196,14 +214,14 @@ async def test_enrich_note_only_calls_place_prompt_for_map_notes(factory):
         assert note.structured == {}
 
 
-async def test_enrich_note_calls_place_prompt_for_map_notes(factory):
+async def test_enrich_note_writes_place_for_map_notes(factory):
     map_note_id = await factory.insert_done_note(
         source_type="map", raw_text="Хинкальная на Руставели"
     )
     llm = ScriptedLLMClient(
-        **{
-            "заведения": {"name": "Хинкальная", "district": None, "cuisine": "georgian"},
-        }
+        enrich=_enrich_payload(
+            place={"name": "Хинкальная", "district": None, "cuisine": "georgian"}
+        )
     )
 
     await enrich_note_async(
@@ -227,9 +245,7 @@ async def test_enrich_note_finds_and_records_a_duplicate(factory):
     new_id = await factory.insert_done_note(
         raw_text="open until midnight", embedding=_vec(0.99, 0.01)
     )
-    llm = ScriptedLLMClient(
-        **{"Определи": {"is_duplicate": True, "duplicate_note_id": original_id}}
-    )
+    llm = ScriptedLLMClient(dupes={"is_duplicate": True, "duplicate_note_id": original_id})
 
     await enrich_note_async(
         new_id,
@@ -267,7 +283,7 @@ async def test_enrich_note_marks_failed_on_llm_service_error(factory):
 
 async def test_enrich_note_does_not_touch_status_or_extracted_text(factory):
     note_id = await factory.insert_done_note(extracted_text="the extracted text")
-    llm = ScriptedLLMClient(title={"title": "T"})
+    llm = ScriptedLLMClient(enrich=_enrich_payload(title="T"))
 
     await enrich_note_async(
         note_id,
@@ -282,3 +298,63 @@ async def test_enrich_note_does_not_touch_status_or_extracted_text(factory):
         note = await NoteRepository(session).get(note_id)
         assert note.status == "done"
         assert note.extracted_text == "the extracted text"
+
+
+async def test_enrich_note_applies_corrections_and_reembeds(factory):
+    """The whole reason `enrich()` returns `corrections` at all (03-ingest.md,
+    "Обогащение") - an ASR mishearing ("Белиси" for "Тбилиси") that made it
+    into extracted_text must be fixed and re-embedded, not just reflected
+    in the title."""
+    note_id = await factory.insert_done_note(
+        source_type="instagram",
+        raw_text="https://instagram.com/reel/x",
+        extracted_text="Мы поехали в Белиси на выходные",
+    )
+    llm = ScriptedLLMClient(
+        enrich=_enrich_payload(corrections=[{"wrong": "Белиси", "correct": "Тбилиси"}])
+    )
+
+    await enrich_note_async(
+        note_id,
+        session_factory=factory,
+        llm_client=llm,
+        embedding_client=ReembeddingClient(),
+        llm_enabled=True,
+        timeout_s=10,
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.extracted_text == "Мы поехали в Тбилиси на выходные"
+        assert note.status == "done"  # never left 'done' at any persisted point
+        chunks = (
+            (await session.execute(select(NoteChunk).where(NoteChunk.note_id == note_id)))
+            .scalars()
+            .all()
+        )
+        assert any("Тбилиси" in c.chunk_text for c in chunks)
+
+
+async def test_enrich_note_with_no_corrections_never_reembeds(factory):
+    """Guards the no-op path: an untouched extracted_text/chunk_text means
+    replace_chunks was never called, not just that the text matches by
+    coincidence."""
+    note_id = await factory.insert_done_note(
+        source_type="instagram",
+        raw_text="https://instagram.com/reel/x",
+        extracted_text="Мы поехали в Тбилиси",
+    )
+    llm = ScriptedLLMClient(enrich=_enrich_payload())
+
+    await enrich_note_async(
+        note_id,
+        session_factory=factory,
+        llm_client=llm,
+        embedding_client=FakeEmbeddingClient(),  # embed_passages would raise if called
+        llm_enabled=True,
+        timeout_s=10,
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.extracted_text == "Мы поехали в Тбилиси"
