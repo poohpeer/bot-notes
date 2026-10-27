@@ -43,7 +43,7 @@ from notes_bot.queue.queues import enqueue_process_note
 
 log = logging.getLogger(__name__)
 
-_HEAVY_SOURCE_TYPES = {"instagram", "voice"}
+_HEAVY_SOURCE_TYPES = {"instagram", "voice", "image"}
 
 Job = Literal["all", "hard-delete", "reclaim"]
 

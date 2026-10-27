@@ -408,6 +408,7 @@ def visibility_predicate(*, user_id: int, chat_id: int, is_group_chat: bool,
 | `LLM_ENRICH_TIMEOUT_S` | `120` | ConfigMap |
 | `LLM_SMART_SEARCH_TIMEOUT_S` | `180` | ConfigMap |
 | `EVENTS_TABLE_TIMEOUT_S` | `240` | ConfigMap |
+| `IMAGE_NOTE_TIMEOUT_S` | `120` (по умолчанию, в ConfigMap не задаётся) | код |
 | `WHISPER_MODEL` | `small` | ConfigMap |
 | `MAX_AUDIO_SECONDS` | `1200` | ConfigMap |
 | `MAX_DOWNLOAD_BYTES` | `104857600` | ConfigMap |

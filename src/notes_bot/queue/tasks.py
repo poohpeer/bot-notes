@@ -67,6 +67,7 @@ from notes_bot.domain.chunking import chunk
 from notes_bot.enrich import apply_corrections, enrich, find_duplicate, generate_summary
 from notes_bot.events_table import extract_events_table
 from notes_bot.extractors.base import Extractor
+from notes_bot.extractors.image import ImageExtractor
 from notes_bot.extractors.instagram import InstagramExtractor
 from notes_bot.extractors.map import MapExtractor
 from notes_bot.extractors.page import PageExtractor
@@ -143,6 +144,11 @@ def _get_extractors(settings: Settings) -> dict[str, Extractor]:
                 transcription_client=transcription_client,
                 max_download_bytes=settings.max_download_bytes,
                 max_audio_seconds=settings.max_audio_seconds,
+            ),
+            "image": ImageExtractor(
+                file_client=file_client,
+                llm_client=_get_llm_client(settings),
+                timeout_s=settings.image_note_timeout_s,
             ),
         }
     return _extractors
@@ -362,7 +368,7 @@ async def process_note_async(
                 note_id=note_id, source_type=source_type, source_url=source_url, error=str(exc)
             )
             if sender is not None:
-                await sender.send(chat_id, render_processing_failed())
+                await sender.send(chat_id, render_processing_failed(source_type))
         except Exception as exc:  # noqa: BLE001 — logged and recorded, not swallowed
             await session.rollback()
             async with session_factory() as failure_session:
@@ -374,7 +380,7 @@ async def process_note_async(
                 note_id=note_id, source_type=source_type, source_url=source_url, error=str(exc)
             )
             if sender is not None:
-                await sender.send(chat_id, render_processing_failed())
+                await sender.send(chat_id, render_processing_failed(source_type))
         finally:
             # 06-deployment.md, "Время обработки по source_type" —
             # separately shows the real cost of Whisper.

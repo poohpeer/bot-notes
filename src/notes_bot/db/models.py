@@ -83,7 +83,8 @@ class Note(Base):
             name="notes_enrich_status_ck",
         ),
         CheckConstraint(
-            "source_type IN ('text','voice','page','youtube','instagram','map','table_event')",
+            "source_type IN "
+            "('text','voice','page','youtube','instagram','map','table_event','image')",
             name="notes_source_type_ck",
         ),
         # Key privacy invariant: a group note has no visibility, a private

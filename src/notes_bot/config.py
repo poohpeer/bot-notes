@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # 180s: multiple images plus a structured JSON table is more work per
     # call than synthesizing an answer from already-retrieved text.
     events_table_timeout_s: float = Field(default=240.0, alias="EVENTS_TABLE_TIMEOUT_S")
+    # A photo/screenshot note's vision call (extractors/image.py). `image` rides
+    # the `heavy` queue with voice/instagram, so it runs under
+    # heavy_job_timeout_s (900s) — this only has to cover the call itself,
+    # twice over: ProxyAILLMClient retries once when the reply isn't JSON.
+    image_note_timeout_s: float = Field(default=120.0, alias="IMAGE_NOTE_TIMEOUT_S")
     whisper_model: str = Field(default="small", alias="WHISPER_MODEL")
     max_audio_seconds: int = Field(default=1200, alias="MAX_AUDIO_SECONDS")
     max_download_bytes: int = Field(default=104857600, alias="MAX_DOWNLOAD_BYTES")
