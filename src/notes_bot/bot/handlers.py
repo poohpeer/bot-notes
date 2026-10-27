@@ -24,6 +24,12 @@ keyboard, confirmed here (on_events_table_confirm) — a dedup conflict
 (same date range + type, different text) gets its own
 Оставить старое/Заменить новым message per conflict.
 
+A photo or album without that caption is a note of its own (03-ingest.md,
+"Фото и скриншоты"): in a private chat always, in a group only when the
+caption mentions the bot. The same buffer decides — _flush_events_table_album
+runs after the album's debounce, the first moment it is known whether any
+photo of it carried "/events_table".
+
 Known gap: 03-ingest.md's flow diagram has the worker notify the bot when a
 note finishes processing, and — for voice specifically — "Бот отвечает на
 голосовое распознанным текстом, чтобы пользователь сразу видел, что именно
@@ -76,6 +82,7 @@ from notes_bot.bot.logic import (
     resolve_events_table_conflict,
     restore_note,
     run_search,
+    save_image_note,
     save_note,
     save_voice_note,
     selection_count,
@@ -102,6 +109,7 @@ from notes_bot.bot.render import (
     render_group_note_saved,
     render_group_only,
     render_group_welcome,
+    render_image_note_saved,
     render_list_empty,
     render_no_more_results,
     render_note_deleted,
@@ -125,7 +133,12 @@ from notes_bot.bot.render import (
 from notes_bot.clients.llm import ImageInput
 from notes_bot.clients.telegram_files import TelegramFileClient, TelegramFileError
 from notes_bot.db.repositories import ChatSettingsRepository, UserSettingsRepository
-from notes_bot.domain.group_capture import Entity, mentions_bot, should_capture_group_message
+from notes_bot.domain.group_capture import (
+    Entity,
+    mentions_bot,
+    should_capture_group_message,
+    should_save_photo_note,
+)
 from notes_bot.queue.queues import enqueue_parse_events_table
 
 log = logging.getLogger(__name__)
@@ -677,6 +690,10 @@ class _PendingAlbum:
     # all, and the one we reply to once parsing starts.
     caption_message: Message | None = None
     any_message: Message | None = None
+    # The earliest photo of the group, kept apart from any_message (the
+    # latest): the note's idempotency key must not depend on how far into an
+    # album the debounce happened to fire.
+    first_message: Message | None = None
 
 
 _album_buffers: dict[str, _PendingAlbum] = {}
@@ -720,6 +737,8 @@ async def _buffer_events_table_photo(message: Message, deps: Deps) -> None:
     if file_id not in pending.file_ids:
         pending.file_ids.append(file_id)
     pending.any_message = message
+    if pending.first_message is None or message.message_id < pending.first_message.message_id:
+        pending.first_message = message
     if message.caption:
         pending.caption_message = message
 
@@ -738,11 +757,18 @@ async def _flush_events_table_album(group_key: str, deps: Deps) -> None:
         _album_tasks.pop(group_key, None)
 
     pending = _album_buffers.pop(group_key, None)
-    if pending is None or pending.caption_message is None:
-        return  # no /events_table caption ever arrived — an ordinary photo
+    if pending is None:
+        return
 
-    match = _EVENTS_TABLE_CAPTION_RE.match(pending.caption_message.caption or "")
-    if not match:
+    match = (
+        _EVENTS_TABLE_CAPTION_RE.match(pending.caption_message.caption or "")
+        if pending.caption_message is not None
+        else None
+    )
+    if match is None:
+        # No /events_table caption ever arrived — an ordinary photo, which is
+        # a note of its own unless a group's caption leaves the bot out of it.
+        await _save_photo_note(pending, deps)
         return
     # Optional — a screenshot is already one specific view, unlike a
     # multi-tab file (xlsx, not supported yet) where naming a tab would
@@ -777,6 +803,57 @@ async def _flush_events_table_album(group_key: str, deps: Deps) -> None:
         images=images,
         job_timeout=int(deps.settings.events_table_timeout_s) + 60,
     )
+
+
+async def _save_photo_note(pending: _PendingAlbum, deps: Deps) -> None:
+    """A photo or album with no "/events_table" caption. `caption_message`
+    anchors the note when there is one (it also carries the mention); an
+    uncaptioned album falls back to its first photo, so a retried or late
+    flush of the same group lands on the same tg_message_id (ADR-8)."""
+    anchor = pending.caption_message or pending.first_message
+    if anchor is None or anchor.from_user is None:
+        return
+
+    is_group = anchor.chat.type in _GROUP_TYPES
+    caption = anchor.caption if anchor is pending.caption_message else None
+    entities = [
+        Entity(type=e.type, offset=e.offset, length=e.length)
+        for e in (anchor.caption_entities or [])
+    ]
+    is_mention = mentions_bot(caption or "", entities, deps.bot_username)
+    should_save = should_save_photo_note(is_group=is_group, mentions_bot=is_mention)
+    log.info(
+        "photo note: chat_id=%s msg_id=%s is_group=%s mentions_bot=%s photos=%d save=%s",
+        anchor.chat.id,
+        anchor.message_id,
+        is_group,
+        is_mention,
+        len(pending.file_ids),
+        should_save,
+    )
+    if not should_save:
+        return
+
+    result = await save_image_note(
+        deps,
+        user_id=anchor.from_user.id,
+        chat_id=anchor.chat.id,
+        is_group=is_group,
+        tg_message_id=anchor.message_id,
+        file_ids=pending.file_ids,
+        caption=caption,
+    )
+    if not result.created:
+        # ADR-8, or an edit of a photo that was already saved — silent, same
+        # as the text handlers.
+        return
+    if is_group:
+        await anchor.reply(render_group_note_saved())
+    else:
+        await anchor.answer(
+            render_image_note_saved(visibility=result.visibility),
+            reply_markup=privacy_keyboard(result.note_id, result.visibility),
+        )
 
 
 @router.callback_query(F.data.startswith("evtable_yes:"))

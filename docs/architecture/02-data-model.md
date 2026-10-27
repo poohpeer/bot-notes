@@ -22,7 +22,7 @@ CREATE TABLE notes (
     visibility      TEXT,                     -- 'private' | 'public'; NULL для групповых
 
     -- Контент
-    source_type     TEXT NOT NULL,            -- 'text'|'voice'|'page'|'youtube'|'instagram'|'map'|'table_event'
+    source_type     TEXT NOT NULL,            -- 'text'|'voice'|'page'|'youtube'|'instagram'|'map'|'table_event'|'image'
     source_url      TEXT,
     raw_text        TEXT,                     -- ровно то, что прислал пользователь
     extracted_text  TEXT,                     -- то, что добыли экстракторы
@@ -50,7 +50,7 @@ CREATE TABLE notes (
         CHECK (enrich_status IN ('pending','processing','done','failed','skipped')),
     CONSTRAINT notes_source_type_ck
         CHECK (source_type IN
-            ('text','voice','page','youtube','instagram','map','table_event')),
+            ('text','voice','page','youtube','instagram','map','table_event','image')),
     -- Ключевой инвариант приватности: групповая заметка не имеет visibility,
     -- личная - обязана иметь. Проверяется базой, а не только кодом.
     CONSTRAINT notes_visibility_ck CHECK (
@@ -154,6 +154,7 @@ CREATE TABLE chat_settings (
 | `youtube` | `заголовок + описание + субтитры` (собирается экстрактором в `extracted_text`) |
 | `instagram` | `caption + "\n\n" + транскрипт` (собирается экстрактором в `extracted_text`) |
 | `map` | имя места из финального URL |
+| `image` | `extracted_text` = `caption + "\n\n" + описание + "\n\n" + текст, прочитанный с картинки` (собирается экстрактором через vision-вызов; `caption` в `raw_text`, если он был). `source_url` - Telegram `file_id` картинки, для альбома - несколько через перевод строки (это не ссылка, в выдаче не показывается) |
 | `table_event` | `raw_text` - одно событие, извлечённое из скриншота таблицы (03-ingest.md, "/events_table"); нет `extracted_text`, нет экстрактора - создаётся сразу готовым по подтверждению пользователя |
 
 Разделение `raw_text` / `extracted_text` нужно, потому что редактирование

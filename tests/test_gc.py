@@ -365,3 +365,29 @@ async def test_run_async_job_hard_delete_skips_reclaim(factory, rq_queues):
         # Still 'processing' — reclaim never ran.
         assert (await session.get(Note, note_id)).status == "processing"
     assert fast_queue.job_ids == []
+
+
+async def test_an_image_reclaim_goes_to_the_heavy_queue_with_the_heavy_timeout(factory, rq_queues):
+    fast_queue, heavy_queue = rq_queues
+    image_id = await _make_note(
+        factory, status="processing", source_type="image", source_url="AgACf1", raw_text=None
+    )
+    await _backdate(
+        factory, image_id, column="updated_at", when=datetime.now(UTC) - timedelta(minutes=60)
+    )
+
+    await reclaim_stuck(
+        factory,
+        fast_queue,
+        heavy_queue,
+        FakeAlerts(),
+        stuck_minutes=30,
+        max_attempts=3,
+        heavy_job_timeout_s=900,
+        batch_size=500,
+    )
+
+    assert fast_queue.jobs == []
+    [job] = heavy_queue.jobs
+    assert job.id == f"process_note-{image_id}"
+    assert job.timeout == 900

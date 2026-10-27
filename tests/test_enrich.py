@@ -202,3 +202,14 @@ async def test_find_duplicate_returns_none_when_llm_produces_nothing():
         NullLLMClient(), new_text="x", candidates=[(42, "a")], timeout_s=10
     )
     assert result is None
+
+
+async def test_enrich_labels_an_image_note_and_keeps_no_asr_corrections():
+    """What was read off a picture is not ASR output — its "corrections" must
+    not rewrite extracted_text."""
+    llm = ScriptedLLMClient(
+        _enrich_payload(corrections=[{"wrong": "Белиси", "correct": "Тбилиси"}])
+    )
+    result = await enrich(llm, "text", source_type="image", timeout_s=10)
+    assert "скриншот" in llm.calls[0]["user"]
+    assert result.corrections == []

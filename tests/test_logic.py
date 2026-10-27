@@ -25,6 +25,7 @@ from notes_bot.bot.logic import (
     resolve_events_table_conflict,
     restore_note,
     run_search,
+    save_image_note,
     save_note,
     save_voice_note,
     selection_count,
@@ -1311,3 +1312,77 @@ async def test_cancel_events_table_rejects_the_wrong_user(db_engine, redis_clien
 
     assert await cancel_events_table(deps, session_id=session_id, user_id=999) is False
     assert await deps.pending_events_cache.get(session_id) is not None
+
+
+async def test_save_image_note_keeps_file_ids_in_source_url_and_caption_in_raw_text(
+    deps, db_engine
+):
+    result = await save_image_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=30,
+        file_ids=["AgACf1", "AgACf2"],
+        caption="a caption",
+    )
+    assert result.created is True
+    assert result.source_type == "image"
+    assert result.visibility == "private"
+
+    sf = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    async with sf() as session:
+        note = await session.get(Note, result.note_id)
+        assert note.source_type == "image"
+        assert note.source_url == "AgACf1\nAgACf2"
+        assert note.raw_text == "a caption"
+        assert note.status == "pending"
+
+
+async def test_save_image_note_routes_to_the_heavy_queue_with_its_timeout(deps):
+    """A vision call is minutes-at-worst; RQ's own 180s default is what the
+    heavy queue exists to avoid."""
+    result = await save_image_note(
+        deps,
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=31,
+        file_ids=["AgACf1"],
+        caption=None,
+    )
+    assert result.created is True
+    assert deps.fast_queue.calls == []
+    assert len(deps.heavy_queue.calls) == 1
+    assert deps.heavy_queue.kwargs[0]["job_timeout"] == deps.settings.heavy_job_timeout_s
+
+
+async def test_save_image_note_group_note_has_no_visibility(deps):
+    result = await save_image_note(
+        deps,
+        user_id=1,
+        chat_id=999,
+        is_group=True,
+        tg_message_id=32,
+        file_ids=["AgACf1"],
+        caption="@notesbot запомни",
+    )
+    assert result.created is True
+    assert result.visibility is None
+
+
+async def test_save_image_note_duplicate_delivery_is_not_created_or_enqueued_twice(deps):
+    kwargs = dict(
+        user_id=1,
+        chat_id=1,
+        is_group=False,
+        tg_message_id=33,
+        file_ids=["AgACf1"],
+        caption=None,
+    )
+    first = await save_image_note(deps, **kwargs)
+    second = await save_image_note(deps, **kwargs)
+
+    assert first.created is True
+    assert second.created is False
+    assert len(deps.heavy_queue.calls) == 1

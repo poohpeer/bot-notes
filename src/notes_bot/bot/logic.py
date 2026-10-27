@@ -25,13 +25,17 @@ from notes_bot.db.repositories import ChatSettingsRepository, NoteRepository, Us
 from notes_bot.db.search import search_notes
 from notes_bot.domain.acl import visibility_predicate
 from notes_bot.domain.classify import classify_text_message
+from notes_bot.extractors.image import join_file_ids
 from notes_bot.queue.queues import enqueue_process_note, enqueue_smart_answer
 
 log = logging.getLogger(__name__)
 
 # instagram and voice go to `heavy` — see 03-ingest.md, "Шаг 2. Приём в
 # боте": "Выбрать очередь: instagram и voice → heavy, всё остальное → fast".
-_HEAVY_SOURCE_TYPES = {"instagram", "voice"}
+# `image` joins them: a vision call is minutes-at-worst waiting on ai-proxy,
+# not the seconds `fast` is for, and the heavy queue already carries the
+# longer RQ job timeout (cli/gc.py keeps its own copy of this set).
+_HEAVY_SOURCE_TYPES = {"instagram", "voice", "image"}
 
 
 @dataclass(frozen=True)
@@ -165,6 +169,45 @@ async def save_voice_note(
 
     enqueue_process_note(deps.heavy_queue, note.id, job_timeout=deps.settings.heavy_job_timeout_s)
     return SaveNoteResult(created=True, note_id=note.id, visibility=visibility, source_type="voice")
+
+
+async def save_image_note(
+    deps: Deps,
+    *,
+    user_id: int,
+    chat_id: int,
+    is_group: bool,
+    tg_message_id: int,
+    file_ids: list[str],
+    caption: str | None,
+) -> SaveNoteResult:
+    """A photo or screenshot (an album is one note) sent without the
+    "/events_table" caption. Like voice, a Telegram message *type* rather
+    than a URL to classify; the file_ids go in source_url — see
+    ImageExtractor's docstring — and the caption, if any, in raw_text."""
+    async with deps.session_factory() as session:
+        visibility: str | None = None
+        if not is_group:
+            settings_row = await UserSettingsRepository(session).get_or_create(user_id)
+            visibility = settings_row.default_visibility
+
+        note = await NoteRepository(session).create_note(
+            user_id=user_id,
+            chat_id=chat_id,
+            is_group=is_group,
+            tg_message_id=tg_message_id,
+            source_type="image",
+            source_url=join_file_ids(file_ids),
+            raw_text=caption,
+            visibility=visibility,
+        )
+        await session.commit()
+
+    if note is None:
+        return SaveNoteResult(created=False, note_id=None, visibility=None)
+
+    enqueue_process_note(deps.heavy_queue, note.id, job_timeout=deps.settings.heavy_job_timeout_s)
+    return SaveNoteResult(created=True, note_id=note.id, visibility=visibility, source_type="image")
 
 
 async def toggle_privacy(deps: Deps, *, note_id: int, user_id: int) -> str | None:

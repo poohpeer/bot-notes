@@ -12,6 +12,7 @@ from notes_bot.clients.llm import LLMResult, LLMServiceError
 from notes_bot.clients.translate import TranslateServiceError
 from notes_bot.db.models import Note, NoteChunk
 from notes_bot.db.repositories import NoteRepository, UserSettingsRepository
+from notes_bot.extractors.image import ImageExtractor
 from notes_bot.queue.tasks import process_note_async
 
 pytestmark = pytest.mark.asyncio
@@ -695,3 +696,77 @@ async def test_process_note_still_enqueues_enrich_for_a_plain_text_note(factory)
     )
 
     assert len(llm_queue.calls) == 1
+
+
+class _FileClient:
+    async def download(self, file_id):
+        return b"jpeg-bytes"
+
+
+class _VisionClient:
+    def __init__(self, parsed):
+        self._parsed = parsed
+
+    async def complete(
+        self, *, system, user, json_schema=None, history=None, timeout_s=60.0, images=None
+    ):
+        return LLMResult(text="", parsed=self._parsed, model="scripted", usage=None)
+
+
+async def test_process_note_reads_an_image_note_and_indexes_what_was_read(factory):
+    note_id = await factory.insert_pending_note(
+        source_type="image", source_url="AgACf1\nAgACf2", raw_text="хочу сюда"
+    )
+    extractor = ImageExtractor(
+        file_client=_FileClient(),
+        llm_client=_VisionClient({"description": "Страница ресторана", "text": "Mamacita Tacos"}),
+        timeout_s=10,
+    )
+    llm_queue = FakeQueue()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        extractors={"image": extractor},
+        llm_queue=llm_queue,
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "done"
+        assert note.extracted_text == "хочу сюда\n\nСтраница ресторана\n\nMamacita Tacos"
+        chunks = (
+            (await session.execute(select(NoteChunk).where(NoteChunk.note_id == note_id)))
+            .scalars()
+            .all()
+        )
+        assert "Mamacita Tacos" in chunks[0].chunk_text
+    # Enrichment (title/tags) runs for it like any other note.
+    assert [call[2] for call in llm_queue.calls] == [f"enrich_note-{note_id}"]
+
+
+async def test_process_note_fails_an_unreadable_image_without_a_caption_and_says_so(factory):
+    note_id = await factory.insert_pending_note(
+        source_type="image", source_url="AgACf1", raw_text=None
+    )
+    extractor = ImageExtractor(
+        file_client=_FileClient(),
+        llm_client=_VisionClient({"description": "", "text": ""}),
+        timeout_s=10,
+    )
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        extractors={"image": extractor},
+        sender=sender,
+    )
+
+    async with factory() as session:
+        assert (await NoteRepository(session).get(note_id)).status == "failed"
+    [(chat_id, text)] = sender.sent
+    assert chat_id == 1
+    assert "изображени" in text and "ссылк" not in text

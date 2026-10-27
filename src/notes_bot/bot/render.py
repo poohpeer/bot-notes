@@ -16,7 +16,13 @@ _SOURCE_ICONS = {
     "instagram": "📷",
     "map": "📍",
     "table_event": "📅",
+    "image": "🖼️",
 }
+
+# source_url of these is a Telegram file_id, not a link — nothing a person can
+# open, so it never goes on a card. (A voice note's file_id used to be printed
+# on its card.)
+_FILE_ID_SOURCE_TYPES = frozenset({"voice", "image"})
 
 _FRAGMENT_MAX = 200
 _TITLE_FALLBACK_MAX = 60
@@ -132,13 +138,16 @@ def render_smart_answer_debug(
     return "\n".join(lines)
 
 
-def render_processing_failed() -> str:
+def render_processing_failed(source_type: str | None = None) -> str:
     """process_note's own except-block sends this to the note's own chat —
     previously only an ops-side alert (clients/alerts.py) went out on a
     failure, and the person who actually sent the note got silence, no
     different from a note that was still quietly processing. No error text
     here: that's for the ops alert, not the end user (03-ingest.md,
-    "Обработка не удалась")."""
+    "Обработка не удалась"). "Send the link again" is only advice for a link:
+    a picture has none."""
+    if source_type == "image":
+        return "❌ Не получилось прочитать изображение. Попробуйте отправить его ещё раз."
     return "❌ Не получилось обработать заметку. Попробуйте отправить ссылку ещё раз."
 
 
@@ -221,7 +230,7 @@ def render_search_card(hit: RenderableHit) -> str:
     if hit.tags:
         lines.append(" ".join(f"#{_esc(t)}" for t in hit.tags))
 
-    if hit.source_url:
+    if hit.source_url and hit.source_type not in _FILE_ID_SOURCE_TYPES:
         lines.append(_esc(hit.source_url))
 
     lines.extend(render_places(hit.structured))
@@ -286,6 +295,11 @@ def render_note_saved(*, visibility: str) -> str:
 def render_voice_note_saved(*, visibility: str) -> str:
     label = "приватная 🔒" if visibility == "private" else "публичная 🌐"
     return f"Распознаю голосовое... Заметка {label}."
+
+
+def render_image_note_saved(*, visibility: str) -> str:
+    label = "приватная 🔒" if visibility == "private" else "публичная 🌐"
+    return f"Читаю изображение... Заметка {label}."
 
 
 def render_group_note_saved() -> str:

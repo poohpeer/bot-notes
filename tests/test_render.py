@@ -22,6 +22,7 @@ from notes_bot.bot.render import (
     render_group_note_saved,
     render_group_only,
     render_group_welcome,
+    render_image_note_saved,
     render_list_empty,
     render_no_more_results,
     render_note_deleted,
@@ -469,3 +470,26 @@ def test_events_table_cancelled_message():
 
 def test_events_table_expired_message():
     assert render_events_table_expired()
+
+
+def test_a_file_id_is_never_printed_on_a_card():
+    """source_url of a voice/image note is a Telegram file_id, not a link."""
+    for source_type in ("image", "voice"):
+        hit = _hit(title="x", source_type=source_type, source_url="AgACAgIAAxkBAAI")
+        assert "AgACAgIAAxkBAAI" not in render_search_card(hit)
+
+
+def test_an_image_note_has_its_own_icon():
+    assert render_search_card(_hit(title="Меню", source_type="image")).startswith("🖼️")
+
+
+def test_image_note_saved_reports_visibility():
+    assert "приватная" in render_image_note_saved(visibility="private")
+    assert "публичная" in render_image_note_saved(visibility="public")
+
+
+def test_processing_failed_for_an_image_does_not_ask_for_a_link():
+    assert "ссылк" not in render_processing_failed("image")
+    assert "изображени" in render_processing_failed("image")
+    assert "ссылк" in render_processing_failed("page")
+    assert "ссылк" in render_processing_failed()
