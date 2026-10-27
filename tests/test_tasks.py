@@ -770,3 +770,76 @@ async def test_process_note_fails_an_unreadable_image_without_a_caption_and_says
     [(chat_id, text)] = sender.sent
     assert chat_id == 1
     assert "изображени" in text and "ссылк" not in text
+
+
+class _WallExtractor(FakeExtractor):
+    def __init__(self):
+        self._result = SimpleNamespace(
+            text="",
+            title=None,
+            lang=None,
+            meta={"error": "page needs JavaScript or blocks automated readers", "unreadable": True},
+        )
+
+
+async def test_process_note_tells_the_sender_when_a_page_gave_nothing_to_read(factory):
+    """The note still saves as the link, but a silent "saved" would look like
+    the page had been read."""
+    note_id = await factory.insert_pending_note(
+        source_type="page", source_url="https://wall.example/a", raw_text="https://wall.example/a"
+    )
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        extractors={"page": _WallExtractor()},
+        sender=sender,
+    )
+
+    async with factory() as session:
+        note = await NoteRepository(session).get(note_id)
+        assert note.status == "done"
+        assert note.extracted_text is None
+    [(chat_id, text)] = sender.sent
+    assert chat_id == 1
+    assert "скриншот" in text
+
+
+async def test_process_note_does_not_nag_about_an_ordinary_extraction_failure(factory):
+    note_id = await factory.insert_pending_note(
+        source_type="page", source_url="https://evil.example/", raw_text="https://evil.example/"
+    )
+    sender = FakeSender()
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        extractors={"page": FakeExtractor(text="", error="blocked address")},
+        sender=sender,
+    )
+
+    assert sender.sent == []
+
+
+async def test_a_failed_notice_does_not_fail_a_finished_note(factory):
+    class BrokenSender:
+        async def send(self, chat_id, text, *, parse_mode=None):
+            raise RuntimeError("telegram is down")
+
+    note_id = await factory.insert_pending_note(
+        source_type="page", source_url="https://wall.example/a", raw_text="https://wall.example/a"
+    )
+
+    await process_note_async(
+        note_id,
+        session_factory=factory,
+        embedding_client=FakeEmbeddingClient(),
+        extractors={"page": _WallExtractor()},
+        sender=BrokenSender(),
+    )
+
+    async with factory() as session:
+        assert (await NoteRepository(session).get(note_id)).status == "done"

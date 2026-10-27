@@ -36,6 +36,7 @@ from notes_bot.bot.render import (
     render_events_table_disabled,
     render_events_table_empty,
     render_events_table_preview,
+    render_page_unreadable,
     render_places,
     render_processing_failed,
     render_smart_answer_debug,
@@ -156,9 +157,10 @@ def _get_extractors(settings: Settings) -> dict[str, Extractor]:
 
 async def _extract_and_get_index_text(
     note: Note, note_repo: NoteRepository, extractors: dict[str, Extractor]
-) -> str:
+) -> tuple[str, dict]:
     """Runs the matching extractor (if any), persists what it found, and
-    returns the text that actually gets chunked — see 02-data-model.md,
+    returns the text that actually gets chunked plus the extractor's `meta`
+    (empty when there was no extractor) — see 02-data-model.md,
     "Текст, идущий в индекс", and 03-ingest.md, "Деградация".
 
     A plain 'text' note has no extractor: raw_text is already the text. For
@@ -172,7 +174,7 @@ async def _extract_and_get_index_text(
     extractor step would improve on.
     """
     if note.source_type in ("text", "table_event"):
-        return note.raw_text or ""
+        return note.raw_text or "", {}
 
     extractor = extractors.get(note.source_type)
     if extractor is None:
@@ -192,7 +194,7 @@ async def _extract_and_get_index_text(
         lang=result.lang,
         error=error,
     )
-    return result.text or note.raw_text or ""
+    return result.text or note.raw_text or "", result.meta
 
 
 async def process_note_async(
@@ -253,7 +255,7 @@ async def process_note_async(
         stage_timings: dict[str, float] = {}
         try:
             stage_started = time.perf_counter()
-            text = await _extract_and_get_index_text(note, note_repo, extractors)
+            text, extract_meta = await _extract_and_get_index_text(note, note_repo, extractors)
             stage_timings["extract"] = time.perf_counter() - stage_started
 
             stage_started = time.perf_counter()
@@ -298,6 +300,16 @@ async def process_note_async(
             await session.commit()
             stage_timings["save"] = time.perf_counter() - stage_started
             log.info("process_note: note_id=%s done, chunks=%d", note_id, len(new_chunks))
+
+            if sender is not None and extract_meta.get("unreadable"):
+                # The note is saved (as the link) and findable, but the page
+                # gave nothing to read — say so, or it looks like the text
+                # was read. Best-effort: a failed send must not turn a
+                # finished note into a failed one.
+                try:
+                    await sender.send(chat_id, render_page_unreadable())
+                except Exception:  # noqa: BLE001
+                    log.warning("process_note: note_id=%s unreadable-page notice failed", note_id)
 
             if sender is not None and source_type != "table_event":
                 # /debug (03-ingest.md, "Debug: время обработки") — opt-in,

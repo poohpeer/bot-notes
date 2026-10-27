@@ -138,6 +138,17 @@ def render_smart_answer_debug(
     return "\n".join(lines)
 
 
+def render_page_unreadable() -> str:
+    """The `page` extractor got a JavaScript/bot wall instead of the page
+    (extractors/page.py, looks_like_a_wall). The note keeps only the link;
+    a screenshot is the way around a page this bot cannot open itself."""
+    return (
+        "⚠️ Эта страница не отдала текст: ей нужен JavaScript или она закрыта от "
+        "ботов. Сохранил только ссылку.\n\nПришлите скриншот страницы — "
+        "я его прочитаю (в группе — с упоминанием бота в подписи)."
+    )
+
+
 def render_processing_failed(source_type: str | None = None) -> str:
     """process_note's own except-block sends this to the note's own chat —
     previously only an ops-side alert (clients/alerts.py) went out on a
