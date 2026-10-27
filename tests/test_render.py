@@ -27,6 +27,7 @@ from notes_bot.bot.render import (
     render_no_more_results,
     render_note_deleted,
     render_note_restored,
+    render_page_unreadable,
     render_places,
     render_privacy_toggle_confirmation,
     render_processing_failed,
@@ -493,3 +494,9 @@ def test_processing_failed_for_an_image_does_not_ask_for_a_link():
     assert "изображени" in render_processing_failed("image")
     assert "ссылк" in render_processing_failed("page")
     assert "ссылк" in render_processing_failed()
+
+
+def test_page_unreadable_points_at_the_screenshot_way_out():
+    text = render_page_unreadable()
+    assert "скриншот" in text
+    assert "ссылку" in text

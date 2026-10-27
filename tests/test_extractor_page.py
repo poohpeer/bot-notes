@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from notes_bot.db.models import Note
-from notes_bot.extractors.page import PageExtractor
+from notes_bot.extractors.page import PageExtractor, looks_like_a_wall
 
 pytestmark = pytest.mark.asyncio
 
@@ -90,3 +90,66 @@ async def test_non_html_content_type_is_blocked(dns):
     result = await extractor.extract(_note("http://good.example/file.pdf"))
     assert result.text == ""
     assert "content-type" in result.meta["error"]
+
+
+def _serve(html: str) -> PageExtractor:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=html.encode())
+
+    return PageExtractor(transport=httpx.MockTransport(handler))
+
+
+async def test_a_javascript_wall_is_not_taken_for_the_pages_content(dns):
+    """Live: TripAdvisor answered with this sentence and it was stored as the
+    note's text (note 62)."""
+    html = (
+        "<html><head><title>tripadvisor.ru</title></head>"
+        "<body><p>Please enable JS and disable any ad blocker</p></body></html>"
+    )
+    result = await _serve(html).extract(_note("http://good.example/restaurant"))
+
+    assert result.text == ""
+    assert result.meta["unreadable"] is True
+    assert result.meta["error"]
+
+
+async def test_a_real_page_is_not_flagged_as_a_wall(dns):
+    result = await _serve(HTML).extract(_note("http://good.example/page"))
+
+    assert "Отличное место для хинкали" in result.text
+    assert "unreadable" not in result.meta
+
+
+async def test_an_ordinary_degradation_is_not_marked_unreadable(dns):
+    result = await _serve("<html></html>").extract(_note("http://good.example/"))
+
+    assert result.meta["error"]
+    assert "unreadable" not in result.meta
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Please enable JS and disable any ad blocker",
+        "Please enable JavaScript to continue.",
+        "Just a moment...",
+        "Checking your browser before accessing example.com",
+        "Verify you are human by completing the action below.",
+        "Включите JavaScript, чтобы продолжить",
+        "Access denied",
+    ],
+)
+async def test_wall_texts_are_recognised(text):
+    assert looks_like_a_wall(text) is True
+
+
+async def test_a_long_article_that_mentions_a_captcha_is_not_a_wall():
+    article = "Как работает captcha и зачем нужен JavaScript на сайте. " * 20
+    assert len(article) > 400
+    assert looks_like_a_wall(article) is False
+
+
+async def test_short_ordinary_text_and_empty_text_are_not_walls():
+    assert looks_like_a_wall("Хинкальная на Руставели, работает допоздна.") is False
+    assert looks_like_a_wall("") is False
+    assert looks_like_a_wall("   ") is False
